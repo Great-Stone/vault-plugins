@@ -48,6 +48,8 @@ type backend struct {
 	rotationOnce sync.Once
 	rotationMu   sync.Mutex
 	cron         *cron.Cron
+	rotationCtx  context.Context
+	rotationStop context.CancelFunc
 }
 
 func (b *backend) paths() []*framework.Path {
@@ -73,12 +75,14 @@ func (b *backend) secrets() []*framework.Secret {
 
 func (b *backend) startRotationScheduler(ctx context.Context, conf *logical.BackendConfig) {
 	b.rotationOnce.Do(func() {
+		b.rotationCtx, b.rotationStop = context.WithCancel(ctx)
+
 		// Tick frequently; due evaluation is per-role based on cron schedule.
 		b.cron = cron.New(cron.WithLocation(time.UTC))
 		_, _ = b.cron.AddFunc("@every 15s", func() {
 			b.rotationMu.Lock()
 			defer b.rotationMu.Unlock()
-			_ = b.rotateDueStaticScramRoles(context.Background(), conf.StorageView)
+			_ = b.rotateDueStaticScramRoles(b.rotationCtx, conf.StorageView)
 		})
 		b.cron.Start()
 	})
@@ -88,6 +92,12 @@ func (b *backend) cleanup(ctx context.Context) {
 	_ = ctx
 	b.rotationMu.Lock()
 	defer b.rotationMu.Unlock()
+
+	if b.rotationStop != nil {
+		b.rotationStop()
+		b.rotationStop = nil
+	}
+	b.rotationCtx = nil
 
 	if b.cron == nil {
 		return
