@@ -1,0 +1,13 @@
+# Build outputs
+**/bin/
+dist/
+*.exe
+
+# Keys & local secrets (e.g. GitHub App PEM)
+*.pem
+
+# OS
+.DS_Store
+
+# Editor / agent (local-only)
+.cursor/
