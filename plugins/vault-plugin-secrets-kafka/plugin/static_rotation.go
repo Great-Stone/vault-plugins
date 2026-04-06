@@ -59,20 +59,22 @@ func (b *backend) rotateDueStaticScramRoles(ctx context.Context, s logical.Stora
 			continue
 		}
 
-		// Compute due based on stored next_rotation_at; if missing compute from now.
-		next := now
-		if strings.TrimSpace(r.NextRotationAt) != "" {
-			if t, err := time.Parse(time.RFC3339, r.NextRotationAt); err == nil {
-				next = t
-			}
+		// Determine if a rotation is due.
+		//
+		// Important: if next_rotation_at is empty (initial state), rotate on the
+		// first scan to avoid delaying the first password rotation by an
+		// additional scheduler interval.
+		due := false
+		if strings.TrimSpace(r.NextRotationAt) == "" {
+			due = true
+		} else if t, err := time.Parse(time.RFC3339, r.NextRotationAt); err == nil {
+			due = !now.Before(t)
 		} else {
-			next = sched.Next(now)
-			r.NextRotationAt = next.Format(time.RFC3339)
-			_ = putStaticRole(ctx, s, roleName, r)
-			continue
+			// If the stored value is invalid, recover by attempting rotation now.
+			due = true
 		}
 
-		if now.Before(next) {
+		if !due {
 			continue
 		}
 
