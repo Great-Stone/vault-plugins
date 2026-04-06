@@ -381,7 +381,7 @@ public class App {
             String value = "p-" + UUID.randomUUID();
             try {
                 var sendResult = template.send(topic, key, value)
-                        .get(Duration.ofSeconds(5).toMillis(), TimeUnit.MILLISECONDS)
+                        .get(5, TimeUnit.SECONDS)
                         ;
                 RecordMetadata md = sendResult != null ? sendResult.getRecordMetadata() : null;
                 if (md == null) {
@@ -420,7 +420,7 @@ public class App {
             String value = "v-" + UUID.randomUUID();
             try {
                 template.send(topic, "k", value)
-                        .get(Duration.ofSeconds(10).toMillis(), TimeUnit.MILLISECONDS);
+                        .get(10, TimeUnit.SECONDS);
             } finally {
                 template.destroy();
             }
