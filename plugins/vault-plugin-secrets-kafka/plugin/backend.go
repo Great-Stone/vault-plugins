@@ -33,6 +33,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		RunningVersion: runningVersion,
 		Paths:          b.paths(),
 		Secrets:        b.secrets(),
+		Clean:          b.cleanup,
 	}
 	if err := b.Setup(ctx, conf); err != nil {
 		return nil, err
@@ -81,5 +82,24 @@ func (b *backend) startRotationScheduler(ctx context.Context, conf *logical.Back
 		})
 		b.cron.Start()
 	})
+}
+
+func (b *backend) cleanup(ctx context.Context) {
+	_ = ctx
+	b.rotationMu.Lock()
+	defer b.rotationMu.Unlock()
+
+	if b.cron == nil {
+		return
+	}
+	// Stop() signals the scheduler goroutine and returns a context that is
+	// closed when running jobs have completed.
+	stopCtx := b.cron.Stop()
+	select {
+	case <-stopCtx.Done():
+	case <-time.After(2 * time.Second):
+		// Best-effort: don't block backend unload indefinitely.
+	}
+	b.cron = nil
 }
 
