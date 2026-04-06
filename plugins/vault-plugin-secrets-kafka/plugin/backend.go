@@ -75,7 +75,10 @@ func (b *backend) secrets() []*framework.Secret {
 
 func (b *backend) startRotationScheduler(ctx context.Context, conf *logical.BackendConfig) {
 	b.rotationOnce.Do(func() {
-		b.rotationCtx, b.rotationStop = context.WithCancel(ctx)
+		// Do NOT derive from Factory's ctx, which may be request-scoped and
+		// cancelled shortly after initialization. The scheduler should live for
+		// the lifetime of the backend and be stopped explicitly in cleanup().
+		b.rotationCtx, b.rotationStop = context.WithCancel(context.Background())
 
 		// Tick frequently; due evaluation is per-role based on cron schedule.
 		b.cron = cron.New(cron.WithLocation(time.UTC))
