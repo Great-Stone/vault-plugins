@@ -98,7 +98,8 @@ func (b *backend) rotateDueStaticScramRoles(ctx context.Context, s logical.Stora
 
 		admin, err := newAdminClient(ctx, cfg)
 		if err != nil {
-			return err
+			// If admin connection fails, skip this role and try others.
+			continue
 		}
 		_, err = admin.admin.UpsertUserScramCredentials([]sarama.AlterUserScramCredentialsUpsert{
 			{
@@ -108,10 +109,11 @@ func (b *backend) rotateDueStaticScramRoles(ctx context.Context, s logical.Stora
 				Password:   []byte(newPw),
 			},
 		})
-		admin.Close()
 		if err != nil {
+			admin.Close()
 			continue
 		}
+		admin.Close()
 
 		r.StaticPassword = newPw
 		r.LastRotatedAt = now.Format(time.RFC3339)
