@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vault Kafka Secret Engine 검증</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; margin: 24px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .card { border: 1px solid rgba(127,127,127,.35); border-radius: 12px; padding: 16px; max-width: 980px; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: transparent; cursor: pointer; }
+    button.primary { background: rgba(59,130,246,.14); border-color: rgba(59,130,246,.45); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    pre { white-space: pre-wrap; word-break: break-word; line-height: 1.35; font-size: 13px; background: rgba(127,127,127,.12); padding: 12px; border-radius: 10px; }
+    .ok { color: #16a34a; }
+    .fail { color: #dc2626; }
+    .muted { opacity: .75; }
+    .steps { display: grid; gap: 10px; }
+    .step { padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); }
+    .step h4 { margin: 0 0 6px; font-size: 14px; }
+    .step .meta { font-size: 12px; opacity: .8; }
+    .events { height: 220px; overflow: auto; background: rgba(127,127,127,.12); border-radius: 10px; padding: 10px; font-size: 12px; }
+    .events .line { border-bottom: 1px solid rgba(127,127,127,.18); padding: 6px 2px; }
+  </style>
+</head>
+<body>
+  <h2>Vault Kafka Secret Engine 검증 UI</h2>
+  <p class="muted">
+    UI에서 Vault(AppRole)로 Kafka creds를 발급하고 Kafka 접근을 검증합니다.
+    lease revoke는 자동이 아니라 <b>수동 버튼</b>으로 실행합니다.
+  </p>
+
+  <div class="row">
+    <div class="card" style="flex: 1 1 520px;">
+      <div class="row" style="align-items:center; justify-content: space-between;">
+        <div>
+          <div><b>현재 설정</b></div>
+          <div class="muted" id="cfg">불러오는 중…</div>
+          <div style="height: 8px;"></div>
+          <div class="row" style="align-items:center;">
+            <div class="muted">kind</div>
+            <select id="kind" style="padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: transparent;">
+              <option value="dynamic">dynamic (kafka/creds/*)</option>
+              <option value="static">static (kafka/static-creds/*)</option>
+            </select>
+            <div style="width: 10px;"></div>
+            <div class="muted">role</div>
+            <select id="role" style="padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: transparent;">
+              <option value="">(loading…)</option>
+            </select>
+          </div>
+          <div class="muted" id="roleDef" style="margin-top: 8px;"></div>
+        </div>
+        <div class="row">
+          <button id="refresh">새로고침</button>
+        </div>
+      </div>
+      <hr style="border:none;border-top:1px solid rgba(127,127,127,.25); margin: 14px 0;">
+      <div class="row" style="align-items:center; justify-content: space-between;">
+        <div id="summary" class="muted">대기 중</div>
+        <div class="row">
+          <button id="pollStart">1초 주기 시작</button>
+          <button id="pollStop">일시정지</button>
+          <button id="renew">Renew(수동)</button>
+          <button id="revoke" class="primary">Revoke(수동)</button>
+        </div>
+      </div>
+      <div style="height: 10px;"></div>
+      <div class="muted">lease_id: <code id="leaseId">(none)</code></div>
+      <div class="muted">action: <code id="action">(none)</code> · latency: <code id="latency">(none)</code></div>
+      <div class="muted">last refresh: <code id="refreshedAt">(none)</code></div>
+      <div style="height: 10px;"></div>
+      <div class="muted" id="leaseMeta"></div>
+      <div style="height: 10px;"></div>
+      <div><b>이벤트(최신이 위)</b></div>
+      <div class="events" id="events"></div>
+    </div>
+
+    <div class="card" style="flex: 1 1 420px;">
+      <div><b>원본 결과(JSON)</b></div>
+      <pre id="raw">대기 중</pre>
+      <div style="height: 14px;"></div>
+      <div><b>최근 60건(우측 신규)</b></div>
+      <canvas id="hist" width="420" height="90" style="width: 100%; height: 90px; border-radius: 10px; background: rgba(127,127,127,.12);"></canvas>
+    </div>
+  </div>
+
+<script>
+  const el = (id) => document.getElementById(id);
+  const state = { statusPoll: null, historyPoll: null, lastEventTs: null, eventCount: 0 };
+
+  function fmt(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    return isNaN(d) ? String(ts) : d.toLocaleString();
+  }
+
+  function setBusy(busy) {
+    el("refresh").disabled = busy;
+  }
+
+  function render(result) {
+    if (!result) return;
+    const status = result.status;
+    const s = status === "SUCCESS" ? `<span class="ok"><b>SUCCESS</b></span>`
+            : status === "FAILED" ? `<span class="fail"><b>FAILED</b></span>`
+            : `<span class="muted"><b>${status}</b></span>`;
+    el("summary").innerHTML =
+      `${s} · ts=${fmt(result.ts)} · role=<code>${escapeHtml(result.role || "")}</code>` +
+      (result.errorKind ? ` · errorKind=<code>${escapeHtml(result.errorKind)}</code>` : "");
+
+    el("action").textContent = result.action || "(none)";
+    el("latency").textContent = (result.latencyMs != null ? `${result.latencyMs}ms` : "(none)");
+
+    if (result.lease && result.lease.leaseId) el("leaseId").textContent = result.lease.leaseId;
+    el("leaseMeta").innerHTML = result.lease
+      ? `username=<code>${escapeHtml(result.lease.username || "")}</code> renewable=<code>${escapeHtml(String(result.lease.renewable))}</code> expiresAt=<code>${escapeHtml(result.lease.expiresAt || "")}</code>`
+      : `<span class="muted">(lease 없음)</span>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+    }[c]));
+  }
+
+  async function loadConfig() {
+    const r = await fetch("/api/config");
+    const j = await r.json();
+    el("cfg").innerHTML = `role=<code>${escapeHtml(j.role)}</code> topic=<code>${escapeHtml(j.topic)}</code> vault=<code>${escapeHtml(j.vaultAddr)}</code>`;
+  }
+
+  async function loadRoles() {
+    const cfg = await (await fetch("/api/config")).json();
+    let roles = [];
+    const kind = el("kind").value || "dynamic";
+    try {
+      const r = await fetch(kind === "static" ? "/api/static-roles" : "/api/roles");
+      const j = await r.json();
+      roles = (j.roles || []);
+    } catch (e) {
+      roles = [];
+    }
+
+    // dynamic: roles가 비어도 기본 role은 항상 표시
+    if (kind === "dynamic" && cfg.role && !roles.includes(cfg.role)) roles.unshift(cfg.role);
+
+    const sel = el("role");
+    if (!roles.length) {
+      const fallback = kind === "dynamic" ? (cfg.role || "") : "";
+      sel.innerHTML = `<option value="${escapeHtml(fallback)}">${escapeHtml(fallback || "(no roles)")}</option>`;
+      sel.value = fallback;
+      return;
+    }
+    sel.innerHTML = roles.map(x => `<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join("");
+    if (kind === "dynamic" && cfg.role && roles.includes(cfg.role)) sel.value = cfg.role;
+  }
+
+  async function loadRoleDef() {
+    const role = el("role").value;
+    if (!role) return;
+    const kind = el("kind").value || "dynamic";
+    const r = await fetch(kind === "static"
+      ? `/api/static-role/${encodeURIComponent(role)}`
+      : `/api/role/${encodeURIComponent(role)}`
+    );
+    const j = await r.json();
+    if (!j.ok) {
+      el("roleDef").textContent = "(role read failed)";
+      return;
+    }
+    const d = j.data || {};
+    const bits = [
+      d.auth_type ? `auth_type=${d.auth_type}` : null,
+      d.scram_mechanism ? `scram=${d.scram_mechanism}` : null,
+      d.rotation_cron ? `rotation_cron=${d.rotation_cron}` : null,
+    ].filter(Boolean);
+    el("roleDef").innerHTML = bits.length ? bits.map(x => `<code>${escapeHtml(x)}</code>`).join(" ") : "<span class='muted'>(no role fields)</span>";
+  }
+
+  async function loadStatus() {
+    const r = await fetch("/api/status");
+    const j = await r.json();
+    render(j);
+    setBusy(false);
+
+    // 최신 상태를 상단에 누적(변화 추적용)
+    if (j && j.ts && j.ts !== state.lastEventTs) {
+      state.lastEventTs = j.ts;
+      const lease = j.lease || {};
+      const line =
+        `<div class="line">` +
+        `<div><b>${escapeHtml(j.status || "")}</b> ts=${escapeHtml(j.ts)}</div>` +
+        `<div class="muted">lease_id=${escapeHtml(lease.leaseId || "(none)")} · action=${escapeHtml(j.action || "(none)")} · latency=${escapeHtml(String(j.latencyMs ?? ""))}ms</div>` +
+        `<div class="muted">username=${escapeHtml(lease.username || "")} renewable=${escapeHtml(String(lease.renewable ?? ""))} expiresAt=${escapeHtml(lease.expiresAt || "")}</div>` +
+        (j.errorKind ? `<div class="fail">errorKind=${escapeHtml(j.errorKind)} ${escapeHtml(j.error || "")}</div>` : ``) +
+        `</div>`;
+      el("events").insertAdjacentHTML("afterbegin", line);
+      state.eventCount++;
+      // 너무 길어지지 않게 300줄까지만 유지
+      while (el("events").children.length > 300) el("events").lastElementChild.remove();
+    }
+  }
+
+  async function loadIssued() {
+    const r = await fetch("/api/issued");
+    const j = await r.json();
+    // issued는 화면 정보용(원본 JSON은 Kafka 결과로)
+    if (j && j.leaseId) el("leaseId").textContent = j.leaseId;
+  }
+
+  async function revoke() {
+    const r = await fetch("/api/revoke", { method: "POST" });
+    const j = await r.json();
+    el("raw").textContent = JSON.stringify(j, null, 2);
+    await loadHistory();
+  }
+
+  async function renew() {
+    const r = await fetch("/api/renew", { method: "POST" });
+    const j = await r.json();
+    el("raw").textContent = JSON.stringify(j, null, 2);
+    await loadIssued();
+    await loadStatus();
+  }
+
+  async function pollStart() {
+    const role = el("role").value;
+    const kind = el("kind").value || "dynamic";
+    await fetch("/api/polling/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role, kind })
+    });
+    await loadHistory();
+  }
+
+  async function pollStop() {
+    await fetch("/api/polling/stop", { method: "POST" });
+    await loadHistory();
+  }
+
+  function drawHistory(points) {
+    const c = el("hist");
+    const ctx = c.getContext("2d");
+    ctx.clearRect(0, 0, c.width, c.height);
+    const n = 60;
+    const w = c.width / n;
+    for (let i = 0; i < n; i++) {
+      const p = points[i - (n - points.length)];
+      const ok = p ? !!p.ok : null;
+      ctx.fillStyle = ok === null ? "rgba(127,127,127,.20)" : ok ? "rgba(22,163,74,.85)" : "rgba(220,38,38,.85)";
+      const h = ok === null ? 12 : ok ? 60 : 60;
+      ctx.fillRect(i * w + 1, c.height - h, Math.max(1, w - 2), h);
+    }
+  }
+
+  async function loadHistory() {
+    const r = await fetch("/api/history");
+    const j = await r.json();
+    drawHistory(j.points || []);
+  }
+
+  async function loadKafkaRaw() {
+    const r = await fetch("/api/kafka/raw");
+    const j = await r.json();
+    el("raw").textContent = JSON.stringify(j, null, 2);
+  }
+
+  async function refreshAll() {
+    el("refreshedAt").textContent = new Date().toLocaleString();
+    await loadConfig();
+    await loadRoles();
+    await loadRoleDef();
+    await loadStatus();
+    await loadIssued();
+    await loadKafkaRaw();
+    await loadHistory();
+  }
+
+  el("refresh").addEventListener("click", refreshAll);
+  el("revoke").addEventListener("click", revoke);
+  el("renew").addEventListener("click", renew);
+  el("pollStart").addEventListener("click", pollStart);
+  el("pollStop").addEventListener("click", pollStop);
+  el("role").addEventListener("change", loadRoleDef);
+  el("kind").addEventListener("change", async () => {
+    await loadRoles();
+    await loadRoleDef();
+  });
+
+  loadConfig().then(loadRoles).then(async () => {
+    await refreshAll();
+    state.statusPoll = setInterval(loadStatus, 800);
+    state.historyPoll = setInterval(loadHistory, 1000);
+    setInterval(loadIssued, 1000);
+    setInterval(loadKafkaRaw, 1000);
+  });
+</script>
+</body>
+</html>
+

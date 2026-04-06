@@ -1,15 +1,20 @@
 # vault-plugins
 
-HashiCorp Vault용 커스텀 시크릿 엔진 플러그인 모음입니다. 각 플러그인은 Go로 작성되며 [Vault 플러그인 개발 가이드](https://developer.hashicorp.com/vault/docs/plugins/plugin-development)의 `plugin.ServeMultiplex` 및 `github.com/hashicorp/vault/sdk`의 `framework.Backend` 패턴을 따릅니다.
+A collection of custom plugins for HashiCorp Vault. Plugins in this repository are written in Go and follow the Vault SDK `framework.Backend` pattern with plugin multiplexing (`plugin.ServeMultiplex`).
 
-## 포함된 플러그인
+Korean documentation (한국어): [`README.ko.md`](./README.ko.md)
 
-| 디렉터리 | 설명 |
-|----------|------|
-| [plugins/vault-plugin-secrets-github](plugins/vault-plugin-secrets-github/) | GitHub App **설치 액세스 토큰**을 발급합니다. 조직/사용자 fine-grained PAT의 **신규 생성**은 GitHub REST API에서 지원하지 않으므로, 동적 발급은 GitHub App 흐름으로 제공합니다. |
+## Included plugins
 
-## 참고 자료
+| Directory | Description |
+|---|---|
+| `plugins/vault-plugin-secrets-kafka` | Kafka auth secret engine (dynamic SCRAM issuance/revocation + a foundation for static bundles). Includes a local `docker compose` stack and a Spring Boot validation UI |
+| `plugins/vault-plugin-secrets-github` | Secret engine to mint GitHub App installation access tokens |
 
-- [Plugin development](https://developer.hashicorp.com/vault/docs/plugins/plugin-development)
-- [Register a plugin](https://developer.hashicorp.com/vault/docs/plugins/register-plugin)
-- 예시 레포지토리: [vault-plugin-secrets-openai](https://github.com/gitrgoliveira/vault-plugin-secrets-openai)
+Open `http://localhost:8080` to see periodic validation, history, and manual renew/revoke controls.
+
+## References
+
+- Vault plugin development: `https://developer.hashicorp.com/vault/docs/plugins/plugin-development`
+- Register a plugin: `https://developer.hashicorp.com/vault/docs/plugins/register-plugin`
+

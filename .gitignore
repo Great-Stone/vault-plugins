@@ -3,11 +3,47 @@
 dist/
 *.exe
 
+# Go build/test artifacts
+*.test
+cover.out
+coverage.out
+
+# Java/Gradle build outputs (examples)
+**/build/
+.gradle/
+
+# Logs / temp
+*.log
+*.tmp
+*.swp
+*~
+
+# Docker / Compose local overrides
+docker-compose.override.yml
+.env
+.env.*
+
+# Local runtime/secrets directories (examples)
+**/spring-app-secrets/
+
+# Vault dev plugin binary copied for compose examples
+plugins/vault-plugin-secrets-kafka/dist/vault-plugin-secrets-kafka
+plugins/vault-plugin-secrets-kafka/examples/docker-compose/vault/plugins/vault-plugin-secrets-kafka
+
 # Keys & local secrets (e.g. GitHub App PEM)
 *.pem
 
 # OS
 .DS_Store
 
+# IDEs
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+
 # Editor / agent (local-only)
+.vscode/
 .cursor/
+

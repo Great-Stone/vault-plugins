@@ -1,0 +1,18 @@
+spring:
+  application:
+    name: spring-boot-testapp
+  config:
+    import:
+      - "optional:configtree:/etc/config/vault-approle/"
+
+  cloud:
+    vault:
+      uri: ${VAULT_ADDR:http://vault:8200}
+      authentication: TOKEN
+      token: ${token:}
+      kv:
+        enabled: false
+
+server:
+  port: 8080
+
