@@ -229,6 +229,44 @@ vault read kafka/static-creds/app_scram
 
 The response includes `last_rotated_at` and `next_rotation_at` (RFC3339) for `scram` roles.
 
+## Quick Kafka check with kcat (optional)
+
+You can validate the broker from your machine before or alongside the full stack using [kcat](https://github.com/edenhill/kcat) (formerly **kafkacat**), a small CLI producer/consumer for Kafka.
+
+**Install (pick one):**
+
+- **macOS (Homebrew):** `brew install kcat`
+- **Debian/Ubuntu:** `apt install kcat` (some releases still ship the binary as `kafkacat`; either name may apply)
+- **Other:** see the [kcat releases](https://github.com/edenhill/kcat/releases) or run a container image published for `kcat` if you prefer not to install a binary
+
+With the compose Kafka service up (`examples/docker-compose`, `kafka` + `kafka-init`), the broker exposes host listeners on `localhost:19092` (PLAINTEXT) and `localhost:19093` (SASL/SCRAM). List metadata / topics on PLAINTEXT:
+
+```bash
+kcat -b localhost:19092 -L
+```
+
+To **consume** from `test-topic` using **SCRAM-SHA-256** credentials (e.g. from `vault read kafka/creds/<role>` or a static bundle), use the SASL listener and pass username/password:
+
+```bash
+kcat -b localhost:19093 \
+  -X security.protocol=SASL_PLAINTEXT \
+  -X sasl.mechanism=SCRAM-SHA-256 \
+  -X sasl.username=<username> \
+  -X sasl.password=<password> \
+  -t test-topic -C -o beginning
+```
+
+To **produce** a single message (same SASL settings):
+
+```bash
+echo "hello" | kcat -b localhost:19093 \
+  -X security.protocol=SASL_PLAINTEXT \
+  -X sasl.mechanism=SCRAM-SHA-256 \
+  -X sasl.username=<username> \
+  -X sasl.password=<password> \
+  -t test-topic -P
+```
+
 ## Local end-to-end test (Docker Compose)
 
 This repository includes an end-to-end validation stack (Vault + Kafka + Spring Boot UI) intended for verification.

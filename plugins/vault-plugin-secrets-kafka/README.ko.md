@@ -233,6 +233,44 @@ vault read kafka/static-creds/app_scram
 
 `scram` role의 응답에는 `last_rotated_at`, `next_rotation_at`(RFC3339)이 포함됩니다.
 
+## kcat으로 확인하기 (옵션)
+
+전체 스택을 올리기 전·후에, 호스트에서 [kcat](https://github.com/edenhill/kcat)(예전 이름 **kafkacat**)으로 브로커를 점검할 수 있습니다. Kafka용 경량 CLI 프로듀서/컨슈머입니다.
+
+**설치 예시**
+
+- **macOS (Homebrew):** `brew install kcat`
+- **Debian/Ubuntu:** `apt install kcat`(배포판에 따라 패키지/바이너리 이름이 `kafkacat`인 경우도 있음)
+- **그 외:** [kcat 릴리스](https://github.com/edenhill/kcat/releases)를 참고하거나, 로컬에 바이너리를 설치하지 않으려면 공개된 `kcat` 컨테이너 이미지를 사용할 수 있습니다
+
+Compose의 Kafka가 떠 있을 때(`examples/docker-compose`에서 `kafka` + `kafka-init`) 브로커는 호스트에 `localhost:19092`(PLAINTEXT), `localhost:19093`(SASL/SCRAM)로 노출됩니다. PLAINTEXT로 메타데이터/토픽 목록을 보려면:
+
+```bash
+kcat -b localhost:19092 -L
+```
+
+**SCRAM-SHA-256**으로 `test-topic`을 **구독**하려면(`vault read kafka/creds/<role>` 또는 정적 번들에서 받은 사용자/비밀번호로 `USER`/`PASS` 대체):
+
+```bash
+kcat -b localhost:19093 \
+  -X security.protocol=SASL_PLAINTEXT \
+  -X sasl.mechanism=SCRAM-SHA-256 \
+  -X sasl.username=<username> \
+  -X sasl.password=<password> \
+  -t test-topic -C -o beginning
+```
+
+동일한 SASL 설정으로 `test-topic`에 `hello` 메시지 프로듀스 예시:
+
+```bash
+echo "hello" | kcat -b localhost:19093 \
+  -X security.protocol=SASL_PLAINTEXT \
+  -X sasl.mechanism=SCRAM-SHA-256 \
+  -X sasl.username=<username> \
+  -X sasl.password=<password> \
+  -t test-topic -P
+```
+
 ## 로컬 E2E 테스트(Docker Compose)
 
 이 저장소에는 검증용 E2E 스택(Vault + Kafka + Spring Boot UI)이 포함되어 있습니다.
