@@ -9,7 +9,7 @@ Kafka 인증을 위한 HashiCorp Vault **시크릿 엔진 플러그인**입니�
 - `kafka/config`: Kafka 연결/관리자 부트스트랩 설정
 - `kafka/roles/<name>`: **동적(dynamic)** role 정의(SCRAM 발급, TTL, 선택적 ACL 힌트)
 - `kafka/creds/<role>`: **동적(dynamic)** 자격 증명 발급(응답에 `lease_id` + `data`)
-- `kafka/static-roles/<name>`: **정적(static)** role 정의(저장된 번들 + 선택적 SCRAM rotation)
+- `kafka/static-roles/<name>`: **정적(static)** role 정의(저장된 번들; SCRAM은 `rotation_cron` 필수)
 - `kafka/static-creds/<role>`: **정적(static)** 번들 반환(응답에 `lease_id` + `data`)
 
 ## 무엇을 제공하나요?
@@ -22,7 +22,7 @@ Kafka 인증을 위한 HashiCorp Vault **시크릿 엔진 플러그인**입니�
 ### 정적 번들(기반)
 
 정적(static) role은 “미리 준비된 자격 증명 번들(예: SASL/PLAIN, mTLS)을 Vault가 배포”하는 기반 모델입니다.  
-정적 role은 기본적으로 Kafka 사용자/ACL을 생성/삭제하지 않고 **저장된 번들을 반환**합니다. 단, `auth_type=scram`일 때는 선택적으로 rotation 스케줄러를 통해 Kafka와 Vault 저장소의 비밀번호를 주기적으로 갱신할 수 있습니다.
+정적 role은 Kafka 사용자/ACL을 생성/삭제하지 않고 **저장된 번들을 반환**합니다. `auth_type=scram`이면 **`rotation_cron`에 따라** Kafka와 Vault 저장소의 비밀번호를 주기적으로 갱신합니다(Vault `static-creds` 리스 TTL과 무관).
 
 ## 요구사항
 
@@ -37,6 +37,14 @@ Kafka 인증을 위한 HashiCorp Vault **시크릿 엔진 플러그인**입니�
 ```bash
 cd plugins/vault-plugin-secrets-kafka
 make build
+```
+
+`make build`는 **Vault를 실행하는 OS/아키텍처용 네이티브** 바이너리를 만듭니다(macOS/Windows에서 호스트 Vault를 쓸 때 필요). `fork/exec ... exec format error`가 나면 Vault가 돌아가는 환경과 플러그인 바이너리 OS/아키가 맞지 않은 경우가 많습니다(예: Linux용으로 빌드했는데 macOS에서 Vault 실행).
+
+**Docker Compose** 예제에 넣을 플러그인은 Linux용으로 빌드합니다. 빌드 머신의 `go env GOARCH`와 맞추면 일반적인 Docker Desktop 환경(Apple Silicon은 arm64, Intel은 amd64)과 맞습니다:
+
+```bash
+make build-linux
 ```
 
 직접 Go로 빌드하는 예시:
@@ -61,7 +69,8 @@ vault server -dev \
 ```bash
 PLUGIN=$(realpath ./dist/vault-plugin-secrets-kafka)
 SHA256=$(shasum -a 256 "$PLUGIN" | awk '{print $1}')
-VAULT_TOKEN=root
+export VAULT_TOKEN=root
+export VAULT_ADDR=http://localhost:8200
 vault plugin register -sha256="$SHA256" secret vault-plugin-secrets-kafka
 vault secrets enable -path=kafka -plugin-name=vault-plugin-secrets-kafka plugin
 ```
@@ -127,18 +136,7 @@ vault read kafka/creds/ci
 ```log
 Key                  Value
 ---                  -----
-lease_id             kafka/creds/ci/4MhUj69WMxASYEHxZMA1b43v
-lease_duration       10m
-lease_renewable      false
-auth_type            scram
-bootstrap_servers    localhost:19093
-group_prefix         vaulttest-
-mode                 dynamic
-password             NjVlkTkrkyqpbxWyEBQjfOH5zqqREvwS
-sasl_mechanism       SCRAM-SHA-256
-security_protocol    SASL_PLAINTEXT
-topic                test-topic
-username             vault_ci_6A3cP2lF
+
 ```
 
 응답에는 `lease_id`와 `data`가 포함됩니다(예: `bootstrap_servers`, `username`, `password`, protocol/mechanism 필드). revoke:
@@ -156,22 +154,21 @@ vault read kafka/creds/ci ttl=120
 ## 정적 role 및 static-creds
 
 정적 role은 `static-roles/` 아래에 설정하고 `static-creds/`로 읽습니다. 정적 role은 Kafka 사용자/ACL을 생성/삭제하지 않고 **저장된 번들을 반환**합니다.  
-단, `auth_type=scram`인 경우 선택적으로 scheduler가 Kafka Admin API로 비밀번호를 갱신하고, Vault 저장소의 `static_password`도 최신값으로 업데이트할 수 있습니다.
+`auth_type=scram`이면 **`rotation_cron`을 반드시 지정**하고, scheduler가 해당 주기(UTC)로 Kafka 비밀번호와 Vault 저장소의 `static_password`를 갱신합니다. **비밀번호 갱신 시점은 Vault 리스 TTL과 무관**합니다.
+
+`kafka/static-creds/` 응답에 붙는 Vault 리스 TTL은 **역할별로 설정하지 않으며**, 플러그인 고정값(기본 TTL 3600초, max TTL 86400초)을 사용합니다.
 
 ### 정적 role 필드
 
 | 필드 | 타입 | 필수 | 예시 | 설명/주의 |
 |---|---:|:---:|---|---|
 | `name` | string | 예 | `app_plain` | role 이름 |
-| `auth_type` | string | 예 | `plain` / `scram` / `mtls` | 번들 타입. rotation은 v1에서 `scram`만 지원 |
+| `auth_type` | string | 예 | `plain` / `scram` / `mtls` | 번들 타입. 주기적 rotation은 v1에서 `scram`만 |
 | `scram_mechanism` | string | scram만 | `SCRAM-SHA-256` | `SCRAM-SHA-256` 또는 `SCRAM-SHA-512` |
-| `static_username` | string | 경우에 따라 | `my-user` | `plain`/`scram` 번들에서 사용. scram rotation이면 Kafka에 사용자 사전 존재 필요 |
-| `static_password` | string | 경우에 따라 | `...` | `plain`/`scram` 번들에서 사용. scram rotation이면 scheduler가 갱신 |
+| `static_username` | string | 경우에 따라 | `my-user` | `plain`/`scram` 번들. `scram`이면 Kafka에 사용자 사전 존재 필요 |
+| `static_password` | string | 경우에 따라 | `...` | `plain`/`scram` 번들. `scram`이면 scheduler가 rotation 후 갱신 |
 | `static_props` | map | 아니오 | `security.protocol=SASL_SSL` | 추가 client properties(정적 번들로 반환) |
-| `rotation_cron` | string | 아니오 | `*/5 * * * *` | scram password rotation cron(UTC) |
-| `rotation_enabled` | bool | 아니오 | `true` | cron 설정 시 기본 true |
-| `ttl` | seconds | 아니오 | `3600` | `kafka/static-creds/<role>` 기본 TTL |
-| `max_ttl` | seconds | 아니오 | `7200` | TTL 상한(override 포함). `ttl` 이상이어야 함 |
+| `rotation_cron` | string | **scram이면 필수** | `*/5 * * * *` | 비밀번호 rotation cron(UTC). `plain`/`mtls`에서는 무시 |
 
 ### 정적 role 예시(plain)
 
@@ -183,9 +180,7 @@ vault write kafka/static-roles/app_plain \
   auth_type="plain" \
   static_username="my-user" \
   static_password="my-pass" \
-  static_props="security.protocol=SASL_PLAINTEXT" \
-  ttl=3600 \
-  max_ttl=7200
+  static_props="security.protocol=SASL_PLAINTEXT"
 ```
 
 ### 정적 role 예시(SCRAM + rotation)
@@ -202,10 +197,7 @@ vault write kafka/static-roles/app_scram \
   scram_mechanism="SCRAM-SHA-256" \
   static_username="my-scram-user" \
   static_password="initial-password" \
-  rotation_cron="*/1 * * * *" \
-  rotation_enabled=true \
-  ttl=3600 \
-  max_ttl=7200
+  rotation_cron="*/1 * * * *"
 ```
 
 정적 번들 읽기:
@@ -214,7 +206,7 @@ vault write kafka/static-roles/app_scram \
 vault read kafka/static-creds/app_scram
 ```
 
-rotation이 설정되어 있으면 응답에 `last_rotated_at`, `next_rotation_at`(RFC3339)이 포함됩니다.
+`scram` role의 응답에는 `last_rotated_at`, `next_rotation_at`(RFC3339)이 포함됩니다.
 
 ## 로컬 E2E 테스트(Docker Compose)
 
@@ -225,7 +217,7 @@ rotation이 설정되어 있으면 응답에 `last_rotated_at`, `next_rotation_a
 
 ```bash
 cd plugins/vault-plugin-secrets-kafka
-make build
+make build-linux
 cp -f dist/vault-plugin-secrets-kafka examples/docker-compose/vault/plugins/vault-plugin-secrets-kafka
 
 cd examples/docker-compose
@@ -252,3 +244,15 @@ docker compose up -d --build
 
 - OAuth/Kerberos는 **v1 스코프에서 제외**했습니다(대개 외부 IdP/KDC 의존).
 
+lease_id             kafka/creds/ci/4MhUj69WMxASYEHxZMA1b43v
+lease_duration       10m
+lease_renewable      false
+auth_type            scram
+bootstrap_servers    localhost:19093
+group_prefix         vaulttest-
+mode                 dynamic
+password             NjVlkTkrkyqpbxWyEBQjfOH5zqqREvwS
+sasl_mechanism       SCRAM-SHA-256
+security_protocol    SASL_PLAINTEXT
+topic                test-topic
+username             vault_ci_6A3cP2lF

@@ -115,4 +115,3 @@ func (b *backend) cleanup(ctx context.Context) {
 	}
 	b.cron = nil
 }
-

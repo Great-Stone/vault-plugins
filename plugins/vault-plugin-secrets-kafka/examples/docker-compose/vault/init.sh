@@ -44,9 +44,7 @@ vault write kafka/static-roles/app_plain \
   auth_type="plain" \
   static_username="my-user" \
   static_password="my-pass" \
-  static_props="security.protocol=SASL_PLAINTEXT" \
-  ttl=60 \
-  max_ttl=600
+  static_props="security.protocol=SASL_PLAINTEXT"
 
 vault write kafka/static-roles/app_scram \
   name="app_scram" \
@@ -54,10 +52,7 @@ vault write kafka/static-roles/app_scram \
   scram_mechanism="SCRAM-SHA-256" \
   static_username="static_user" \
   static_password="static-initial-pass" \
-  rotation_cron="*/1 * * * *" \
-  rotation_enabled=true \
-  ttl=60 \
-  max_ttl=600
+  rotation_cron="*/1 * * * *"
 
 echo "Configuring AppRole for spring-app..."
 vault auth enable approle >/dev/null 2>&1 || true

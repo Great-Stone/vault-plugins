@@ -4,9 +4,9 @@ import (
 	"context"
 	"strings"
 
+	"github.com/IBM/sarama"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
-	"github.com/IBM/sarama"
 )
 
 func (b *backend) revokeScramSecret(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
@@ -71,4 +71,3 @@ func (b *backend) revokeScramSecret(ctx context.Context, req *logical.Request, _
 	})
 	return nil, nil
 }
-

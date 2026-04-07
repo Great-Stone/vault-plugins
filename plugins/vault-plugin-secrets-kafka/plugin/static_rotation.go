@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/IBM/sarama"
+	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/robfig/cron/v3"
 )
 
@@ -46,7 +46,7 @@ func (b *backend) rotateDueStaticScramRoles(ctx context.Context, s logical.Stora
 		if r.AuthType != authScram {
 			continue
 		}
-		if !r.RotationEnabled || strings.TrimSpace(r.RotationCron) == "" {
+		if strings.TrimSpace(r.RotationCron) == "" {
 			continue
 		}
 		if strings.TrimSpace(r.StaticUsername) == "" {
@@ -151,4 +151,3 @@ func putStaticRole(ctx context.Context, s logical.Storage, name string, r *stati
 	}
 	return s.Put(ctx, entry)
 }
-

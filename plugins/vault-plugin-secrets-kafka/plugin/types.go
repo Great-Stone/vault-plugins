@@ -61,13 +61,8 @@ type staticRole struct {
 	// SCRAM-specific (static distribution + rotation)
 	ScramMechanism string `json:"scram_mechanism,omitempty"` // SCRAM-SHA-256 or SCRAM-SHA-512
 
-	// Rotation
-	RotationEnabled bool   `json:"rotation_enabled,omitempty"`
-	RotationCron    string `json:"rotation_cron,omitempty"` // e.g. "*/5 * * * *"
-	LastRotatedAt   string `json:"last_rotated_at,omitempty"`
-	NextRotationAt  string `json:"next_rotation_at,omitempty"`
-
-	TTL    int `json:"ttl"`
-	MaxTTL int `json:"max_ttl"`
+	// Rotation (auth_type=scram only; required on write — password rotates on this schedule)
+	RotationCron   string `json:"rotation_cron,omitempty"` // e.g. "*/5 * * * *"
+	LastRotatedAt  string `json:"last_rotated_at,omitempty"`
+	NextRotationAt string `json:"next_rotation_at,omitempty"`
 }
-

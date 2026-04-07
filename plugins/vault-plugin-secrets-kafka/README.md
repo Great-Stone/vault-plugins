@@ -9,7 +9,7 @@ A HashiCorp Vault **secrets engine plugin** for Kafka authentication.
 - `kafka/config`: connection/admin bootstrap configuration
 - `kafka/roles/<name>`: **dynamic** role definition (SCRAM issuance, TTLs, optional ACL hints)
 - `kafka/creds/<role>`: issue **dynamic** credentials (returns `lease_id` + `data`)
-- `kafka/static-roles/<name>`: **static** role definition (stored bundle + optional SCRAM rotation)
+- `kafka/static-roles/<name>`: **static** role definition (stored bundle; SCRAM requires `rotation_cron`)
 - `kafka/static-creds/<role>`: return **static** credential bundle (returns `lease_id` + `data`)
 
 ## What it does
@@ -20,7 +20,7 @@ When you read `kafka/creds/<role>`, the plugin issues a short-lived SCRAM userna
 
 ### Static bundles (foundation)
 
-The role model supports static mode as a foundation for distributing pre-provisioned auth material (e.g., SASL/PLAIN, mTLS). The local validation UI/server are structured to display/compare credential profiles, but the primary working path is dynamic SCRAM.
+The role model supports static mode for distributing pre-provisioned auth material (e.g., SASL/PLAIN, mTLS). For SASL/SCRAM static roles, password rotation is driven only by `rotation_cron` (not by Vault TTL on `static-creds`). The local validation UI is structured to display/compare credential profiles; the primary working path is dynamic SCRAM.
 
 ## Requirements
 
@@ -35,6 +35,14 @@ From this directory:
 ```bash
 cd plugins/vault-plugin-secrets-kafka
 make build
+```
+
+`make build` produces a **native** binary for the machine running `vault` (required when Vault runs on macOS or Windows). If you previously saw `exec format error` from `fork/exec .../vault-plugin-secrets-kafka`, the plugin was almost certainly built for the wrong OS/arch (for example Linux while Vault runs on the host).
+
+For the **Docker Compose** stack, build a Linux plugin that matches your Docker architecture (usually the same as `go env GOARCH` on the build machine):
+
+```bash
+make build-linux
 ```
 
 If you prefer building directly with Go (example):
@@ -59,7 +67,8 @@ Register the plugin and enable the secrets engine:
 ```bash
 PLUGIN=$(realpath ./dist/vault-plugin-secrets-kafka)
 SHA256=$(shasum -a 256 "$PLUGIN" | awk '{print $1}')
-VAULT_TOKEN=root
+export VAULT_TOKEN=root
+export VAULT_ADDR=http://localhost:8200
 vault plugin register -sha256="$SHA256" secret vault-plugin-secrets-kafka
 vault secrets enable -path=kafka -plugin-name=vault-plugin-secrets-kafka plugin
 ```
@@ -150,22 +159,21 @@ vault read kafka/creds/ci ttl=120
 
 ## Static roles and credentials
 
-Static roles are configured under `static-roles/` and read via `static-creds/`. Static roles **do not** create/delete Kafka users. For `auth_type=scram`, an optional scheduler can periodically rotate the password in Kafka and update the stored bundle.
+Static roles are configured under `static-roles/` and read via `static-creds/`. Static roles **do not** create/delete Kafka users. For `auth_type=scram`, you **must** set `rotation_cron`; the scheduler rotates the Kafka password and the stored bundle on that schedule (UTC). **Password rotation timing is independent of Vault lease TTL** on `static-creds` reads.
+
+`vault read kafka/static-creds/...` still returns a Vault lease, but its TTL and max TTL are **fixed by the plugin** (defaults: 3600s TTL, 86400s max TTL); they are not configurable per static role.
 
 ### Static role fields
 
 | Field | Type | Required | Example | Notes |
 |---|---:|:---:|---|---|
 | `name` | string | yes | `app_plain` | Role name (also used in the path `kafka/static-roles/<name>`). |
-| `auth_type` | string | yes | `plain` / `scram` / `mtls` | Static bundle type. Rotation is supported only for `scram` (v1). |
+| `auth_type` | string | yes | `plain` / `scram` / `mtls` | Static bundle type. Scheduled rotation applies only to `scram` (v1). |
 | `scram_mechanism` | string | scram only | `SCRAM-SHA-256` | `SCRAM-SHA-256` or `SCRAM-SHA-512`. |
-| `static_username` | string | depends | `my-user` | For `plain` and `scram` bundles. For `scram` rotation, this user must exist in Kafka. |
-| `static_password` | string | depends | `...` | For `plain` and `scram` bundles. For `scram` rotation, this value will be updated by the scheduler. |
+| `static_username` | string | depends | `my-user` | For `plain` and `scram` bundles. For `scram`, this user must already exist in Kafka. |
+| `static_password` | string | depends | `...` | For `plain` and `scram` bundles. For `scram`, the scheduler updates this value after each rotation. |
 | `static_props` | map | no | `security.protocol=SASL_SSL` | Extra client properties to return (static bundle). |
-| `rotation_cron` | string | no | `*/5 * * * *` | Cron expression for `scram` password rotation (UTC). |
-| `rotation_enabled` | bool | no | `true` | Default: `true` when `rotation_cron` is set. |
-| `ttl` | seconds | no | `3600` | Default lease TTL for `kafka/static-creds/<role>`. |
-| `max_ttl` | seconds | no | `7200` | Upper bound for TTL (including overrides). Must be `>= ttl`. |
+| `rotation_cron` | string | **required if `scram`** | `*/5 * * * *` | Cron (UTC) for password rotation. Ignored for `plain` / `mtls`. |
 
 ### Static role example (plain)
 
@@ -177,9 +185,7 @@ vault write kafka/static-roles/app_plain \
   auth_type="plain" \
   static_username="my-user" \
   static_password="my-pass" \
-  static_props="security.protocol=SASL_PLAINTEXT" \
-  ttl=3600 \
-  max_ttl=7200
+  static_props="security.protocol=SASL_PLAINTEXT"
 ```
 
 ### Static role example (SCRAM + rotation)
@@ -187,7 +193,7 @@ vault write kafka/static-roles/app_plain \
 Prerequisites:
 
 - The Kafka cluster must have SCRAM enabled (the compose example enables SCRAM-SHA-256).
-- The user in `static_username` must already exist in Kafka (or be created out-of-band once). Rotation updates the password for that user.
+- The user in `static_username` must already exist in Kafka (or be created out-of-band once). Rotation updates the password for that user on `rotation_cron`.
 
 ```bash
 vault write kafka/static-roles/app_scram \
@@ -196,10 +202,7 @@ vault write kafka/static-roles/app_scram \
   scram_mechanism="SCRAM-SHA-256" \
   static_username="my-scram-user" \
   static_password="initial-password" \
-  rotation_cron="*/1 * * * *" \
-  rotation_enabled=true \
-  ttl=3600 \
-  max_ttl=7200
+  rotation_cron="*/1 * * * *"
 ```
 
 Read the static bundle:
@@ -208,7 +211,7 @@ Read the static bundle:
 vault read kafka/static-creds/app_scram
 ```
 
-The response includes `last_rotated_at` and `next_rotation_at` (RFC3339) when rotation is configured.
+The response includes `last_rotated_at` and `next_rotation_at` (RFC3339) for `scram` roles.
 
 ## Local end-to-end test (Docker Compose)
 
@@ -219,7 +222,7 @@ This repository includes an end-to-end validation stack (Vault + Kafka + Spring 
 
 ```bash
 cd plugins/vault-plugin-secrets-kafka
-make build
+make build-linux
 cp -f dist/vault-plugin-secrets-kafka examples/docker-compose/vault/plugins/vault-plugin-secrets-kafka
 
 cd examples/docker-compose

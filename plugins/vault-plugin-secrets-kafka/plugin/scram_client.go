@@ -31,4 +31,3 @@ func (c *xdgScramClient) Step(challenge string) (string, error) {
 func (c *xdgScramClient) Done() bool {
 	return c.conv.Done()
 }
-

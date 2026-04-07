@@ -130,4 +130,3 @@ func (b *backend) loadConfig(ctx context.Context, s logical.Storage) (*kafkaConf
 	}
 	return &cfg, nil
 }
-

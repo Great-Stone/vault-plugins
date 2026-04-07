@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IBM/sarama"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
-	"github.com/IBM/sarama"
 )
 
 var (
@@ -24,10 +24,6 @@ func pathStaticCreds(b *backend) *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Static role name",
 			},
-			"ttl": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Optional TTL override (must not exceed role max_ttl).",
-			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
@@ -35,7 +31,7 @@ func pathStaticCreds(b *backend) *framework.Path {
 			},
 		},
 		HelpSynopsis:    "Return Kafka static credential bundle for a role",
-		HelpDescription: "Returns the stored credential bundle for the given static role. For auth_type=scram, password may be rotated periodically by the scheduler.",
+		HelpDescription: "Returns the stored credential bundle for the given static role. For auth_type=scram, the password is rotated by the scheduler according to rotation_cron on the role. Vault lease TTL for this response is fixed by the plugin (not related to rotation).",
 	}
 }
 
@@ -58,17 +54,8 @@ func (b *backend) pathStaticCredsRead(ctx context.Context, req *logical.Request,
 		return logical.ErrorResponse("unknown role %q", roleName), nil
 	}
 
-	ttlSec := role.TTL
-	if raw, ok := data.GetOk("ttl"); ok {
-		ttlSec = raw.(int)
-	}
-	if ttlSec <= 0 {
-		ttlSec = defaultRoleTTL
-	}
-	if ttlSec > role.MaxTTL {
-		return logical.ErrorResponse("ttl exceeds role max_ttl (%d)", role.MaxTTL), nil
-	}
-	leaseTTL := time.Duration(ttlSec) * time.Second
+	// Vault lease bookkeeping only; Kafka password rotation is driven by static role rotation_cron.
+	leaseTTL := time.Duration(defaultRoleTTL) * time.Second
 
 	secProto := strings.TrimSpace(cfg.SecurityProtocol)
 	if secProto == "" {
@@ -111,7 +98,7 @@ func (b *backend) pathStaticCredsRead(ctx context.Context, req *logical.Request,
 		"username": role.StaticUsername,
 	})
 	resp.Secret.TTL = leaseTTL
-	resp.Secret.MaxTTL = time.Duration(role.MaxTTL) * time.Second
+	resp.Secret.MaxTTL = time.Duration(defaultRoleMaxTTL) * time.Second
 	return resp, nil
 }
 
@@ -266,12 +253,12 @@ func (b *backend) pathCredsRead(ctx context.Context, req *logical.Request, data 
 	}
 
 	internal := map[string]interface{}{
-		"mode":           "dynamic",
-		"role":           roleName,
-		"username":       username,
+		"mode":            "dynamic",
+		"role":            roleName,
+		"username":        username,
 		"scram_mechanism": strings.ToUpper(role.ScramMechanism),
-		"topic":          role.Topic,
-		"group_prefix":   role.GroupPrefix,
+		"topic":           role.Topic,
+		"group_prefix":    role.GroupPrefix,
 	}
 
 	resp := b.Secret(scramSecretType).Response(out, internal)
@@ -279,4 +266,3 @@ func (b *backend) pathCredsRead(ctx context.Context, req *logical.Request, data 
 	resp.Secret.MaxTTL = time.Duration(role.MaxTTL) * time.Second
 	return resp, nil
 }
-

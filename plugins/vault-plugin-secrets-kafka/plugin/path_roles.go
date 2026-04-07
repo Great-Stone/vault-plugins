@@ -6,6 +6,7 @@ import (
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
+	"github.com/robfig/cron/v3"
 )
 
 func pathDynamicRoles(b *backend) *framework.Path {
@@ -99,7 +100,7 @@ func pathStaticRoles(b *backend) *framework.Path {
 			},
 			"static_password": {
 				Type:        framework.TypeString,
-				Description: "Static password to return. For auth_type=scram with rotation enabled, this is updated by the scheduler.",
+				Description: "Static password to return. For auth_type=scram, this is updated by the scheduler per rotation_cron.",
 				DisplayAttrs: &framework.DisplayAttributes{
 					Sensitive: true,
 				},
@@ -108,23 +109,9 @@ func pathStaticRoles(b *backend) *framework.Path {
 				Type:        framework.TypeKVPairs,
 				Description: "Optional extra client properties to return (static bundle).",
 			},
-			"rotation_enabled": {
-				Type:        framework.TypeBool,
-				Description: "Enable password rotation for auth_type=scram (default: true when rotation_cron is set).",
-			},
 			"rotation_cron": {
 				Type:        framework.TypeString,
-				Description: "Cron expression for SCRAM password rotation (e.g. '*/5 * * * *').",
-			},
-			"ttl": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Default lease/TTL for returned credentials.",
-				Default:     defaultRoleTTL,
-			},
-			"max_ttl": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Maximum TTL for a credential read (including overrides).",
-				Default:     defaultRoleMaxTTL,
+				Description: "Required for auth_type=scram: cron (UTC) for Kafka/Vault password rotation (e.g. '*/5 * * * *'). Ignored for plain/mtls.",
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -134,7 +121,7 @@ func pathStaticRoles(b *backend) *framework.Path {
 			logical.DeleteOperation: &framework.PathOperation{Callback: b.pathStaticRoleDelete},
 		},
 		HelpSynopsis:    "Manage static Kafka credential roles",
-		HelpDescription: "Static roles return stored credential bundles. For auth_type=scram, optional password rotation is supported (v1).",
+		HelpDescription: "Static roles return stored credential bundles. For auth_type=scram, rotation_cron is required; the scheduler rotates the password on that schedule (v1). Vault lease TTL on static-creds reads is fixed by the plugin.",
 	}
 }
 
@@ -262,17 +249,6 @@ func (b *backend) pathStaticRoleWrite(ctx context.Context, req *logical.Request,
 
 	role := staticRole{
 		AuthType: at,
-		TTL:      data.Get("ttl").(int),
-		MaxTTL:   data.Get("max_ttl").(int),
-	}
-	if role.TTL <= 0 {
-		role.TTL = defaultRoleTTL
-	}
-	if role.MaxTTL <= 0 {
-		role.MaxTTL = defaultRoleMaxTTL
-	}
-	if role.MaxTTL < role.TTL {
-		return logical.ErrorResponse("max_ttl must be >= ttl"), nil
 	}
 
 	if v, ok := data.GetOk("static_username"); ok {
@@ -294,19 +270,20 @@ func (b *backend) pathStaticRoleWrite(ctx context.Context, req *logical.Request,
 			return logical.ErrorResponse("scram_mechanism must be SCRAM-SHA-256 or SCRAM-SHA-512"), nil
 		}
 
+		var cronStr string
 		if v, ok := data.GetOk("rotation_cron"); ok {
-			role.RotationCron = strings.TrimSpace(v.(string))
+			cronStr = strings.TrimSpace(v.(string))
 		}
-		if v, ok := data.GetOk("rotation_enabled"); ok {
-			role.RotationEnabled = v.(bool)
-		} else if role.RotationCron != "" {
-			// Default enabled when a schedule is provided.
-			role.RotationEnabled = true
+		if cronStr == "" {
+			return logical.ErrorResponse("rotation_cron is required for auth_type=scram"), nil
 		}
+		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+		if _, err := parser.Parse(cronStr); err != nil {
+			return logical.ErrorResponse("invalid rotation_cron: %v", err), nil
+		}
+		role.RotationCron = cronStr
 	} else {
-		// rotation fields are only for scram.
 		role.RotationCron = ""
-		role.RotationEnabled = false
 		role.ScramMechanism = ""
 	}
 
@@ -330,16 +307,15 @@ func (b *backend) pathStaticRoleRead(ctx context.Context, req *logical.Request, 
 		return nil, nil
 	}
 	out := map[string]interface{}{
-		"auth_type":        string(role.AuthType),
-		"ttl":              role.TTL,
-		"max_ttl":          role.MaxTTL,
-		"rotation_enabled": role.RotationEnabled,
-		"rotation_cron":    role.RotationCron,
-		"last_rotated_at":  role.LastRotatedAt,
-		"next_rotation_at": role.NextRotationAt,
+		"auth_type": string(role.AuthType),
 	}
-	if role.AuthType == authScram && role.ScramMechanism != "" {
-		out["scram_mechanism"] = role.ScramMechanism
+	if role.AuthType == authScram {
+		out["rotation_cron"] = role.RotationCron
+		out["last_rotated_at"] = role.LastRotatedAt
+		out["next_rotation_at"] = role.NextRotationAt
+		if role.ScramMechanism != "" {
+			out["scram_mechanism"] = role.ScramMechanism
+		}
 	}
 	// omit static_password
 	if role.StaticUsername != "" {
@@ -366,4 +342,3 @@ func (b *backend) pathStaticRoleList(ctx context.Context, req *logical.Request, 
 	}
 	return logical.ListResponse(list), nil
 }
-

@@ -78,4 +78,3 @@ func scramClientGenerator(h func() hash.Hash) func() sarama.SCRAMClient {
 		return newXdgScramClient(h)
 	}
 }
-
