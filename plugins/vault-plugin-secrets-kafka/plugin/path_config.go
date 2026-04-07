@@ -88,7 +88,7 @@ func (b *backend) pathConfigWrite(ctx context.Context, req *logical.Request, dat
 		SecurityProtocol:      strings.TrimSpace(data.Get("security_protocol").(string)),
 		SaslMechanism:         strings.TrimSpace(data.Get("sasl_mechanism").(string)),
 		AdminUsername:         strings.TrimSpace(data.Get("admin_username").(string)),
-		AdminPassword:         data.Get("admin_password").(string),
+		AdminPassword:         strings.TrimSpace(data.Get("admin_password").(string)),
 	}
 	if cfg.BootstrapServers == "" {
 		return logical.ErrorResponse("bootstrap_servers is required"), nil

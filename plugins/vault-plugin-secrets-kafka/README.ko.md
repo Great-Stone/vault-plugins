@@ -79,22 +79,36 @@ vault secrets enable -path=kafka -plugin-name=vault-plugin-secrets-kafka plugin
 
 ### `kafka/config`
 
-최소한 클라이언트용/관리자용 bootstrap endpoint를 설정해야 합니다.
+발급되는 **클라이언트**용 부트스트랩(`bootstrap_servers`)과, 플러그인이 SCRAM/ACL 등 **관리 API**를 호출할 때 쓰는 **관리자** 부트스트랩(`admin_bootstrap_servers`)을 설정합니다. `vault write kafka/config`는 Vault에 설정을 저장할 뿐이며, **이 명령 자체가 Kafka에 로그인하지는 않습니다** — Kafka 인증은 플러그인이 나중에 연결할 때 적용됩니다. Vault 쪽에서는 유효한 토큰과 `kafka/config` 쓰기 권한이 필요합니다.
 
-로컬 Kafka를 다음과 같이 실행했다면:
+| 필드 | 설명 |
+|---|---|
+| `bootstrap_servers` | 애플리케이션 클라이언트용 브로커 주소(발급 응답에 포함). |
+| `admin_bootstrap_servers` | Admin API용 브로커(비어 있으면 `bootstrap_servers`와 동일하게 취급). |
+| `security_protocol` | 선택. 운영 환경에서는 관리 연결에 `SASL_PLAINTEXT` 또는 `SASL_SSL`을 쓰는 경우가 많으며, 이때 `admin_username` / `admin_password`가 필요합니다. |
+| `sasl_mechanism` | 관리 클라이언트 SASL 메커니즘(예: `SCRAM-SHA-256`). |
+| `admin_username` / `admin_password` | 관리 API용 Kafka principal. `security_protocol`이 SASL일 때 플러그인에서 필수입니다. |
+
+**운영 환경**에서는 클라이언트·관리 트래픽 모두 인증을 요구하는 경우가 많습니다. 관리용 principal에는 SCRAM 사용자 생성/삭제·ACL 변경 등 필요한 최소 권한만 주는 것이 좋습니다. 이 저장소의 Docker Compose 예제는 `kafka-init`에서 SCRAM 사용자 `vault_admin`을 만들고, `server.properties`의 `super.users`로 데모용 관리 권한을 부여한 뒤, 동일 비밀번호를 `VAULT_KAFKA_ADMIN_PASSWORD`로 Vault의 `kafka/config`에 넘깁니다. 실제 운영에서는 `super.users` 대신 ACL/역할 기반 최소 권한을 검토하세요.
+
+로컬 스택의 Kafka에 **호스트에서** 접속할 때(포트 `19092` / `19093`):
 
 ```bash
 cd examples/docker-compose
-docker compose up kafka kafka-init
+docker compose up -d kafka kafka-init
 ```
-
-호스트에서 Vault CLI로 접속할 때(예제는 호스트 리스너를 노출):
 
 ```bash
 vault write kafka/config \
   bootstrap_servers="localhost:19093" \
-  admin_bootstrap_servers="localhost:19092"
+  admin_bootstrap_servers="localhost:19093" \
+  security_protocol="SASL_PLAINTEXT" \
+  sasl_mechanism="SCRAM-SHA-256" \
+  admin_username="vault_admin" \
+  admin_password="vault-admin-demo-secret"
 ```
+
+Compose 기본값과 맞추려면 `admin_password`는 `VAULT_KAFKA_ADMIN_PASSWORD`와 동일하게 두면 됩니다. (연구용으로만) 관리 전용 PLAINTEXT 리스너를 쓰고 SASL을 쓰지 않는 구성에서는 `security_protocol`을 SASL로 두지 않고 `admin_username`/`admin_password` 없이 연결하는 패턴도 가능합니다.
 
 ### 동적 role: `kafka/roles/<name>`
 
@@ -136,7 +150,18 @@ vault read kafka/creds/ci
 ```log
 Key                  Value
 ---                  -----
-
+lease_id             kafka/creds/ci/4MhUj69WMxASYEHxZMA1b43v
+lease_duration       10m
+lease_renewable      false
+auth_type            scram
+bootstrap_servers    localhost:19093
+group_prefix         vaulttest-
+mode                 dynamic
+password             NjVlkTkrkyqpbxWyEBQjfOH5zqqREvwS
+sasl_mechanism       SCRAM-SHA-256
+security_protocol    SASL_PLAINTEXT
+topic                test-topic
+username             vault_ci_6A3cP2lF
 ```
 
 응답에는 `lease_id`와 `data`가 포함됩니다(예: `bootstrap_servers`, `username`, `password`, protocol/mechanism 필드). revoke:
@@ -235,24 +260,14 @@ docker compose up -d --build
 - **vault-init**: 플러그인 등록/enable, `kafka/config` 작성, role 생성, 테스트용 정책/인증 정보(configtree) 생성
 - **spring-app**: Spring Cloud Vault(Config Data)로 Vault에 접속하여 동적/정적 번들을 선택해 1초 주기 produce 검증
 
+**Kafka 관리 계정(compose):** `kafka-init`이 SCRAM 사용자 `vault_admin`을 만들고(비밀번호는 `VAULT_KAFKA_ADMIN_PASSWORD`, 기본 `vault-admin-demo-secret`), 브로커 `super.users`에 `User:vault_admin`을 넣어 플러그인이 쓰는 Admin API(SCRAM·ACL 등)가 데모에서 동작하도록 했습니다. `vault-init`은 동일 비밀번호를 `kafka/config`의 `admin_username`/`admin_password`와 `SASL_PLAINTEXT`+`SCRAM-SHA-256`에 기록합니다. 운영에서는 환경 변수로 강한 비밀번호를 쓰고, `super.users` 대신 ACL 기반 최소 권한을 권장합니다.
+
 ### 예제 스택 관련 주의사항
 
 - **SASL/PLAIN**을 검증하려면 브로커가 `PLAIN` 메커니즘을 활성화해야 합니다(예제 `server.properties`는 `SCRAM-SHA-256` + `PLAIN`을 활성화).
 - **ACL authorizer**가 켜져 있고(예제는 StandardAuthorizer), 한 번이라도 ACL이 존재하면 principal별로 명시적 권한이 필요할 수 있습니다. 예제 `kafka-init`은 `app_plain`/`app_scram`용 principal에 `test-topic` RW 권한을 추가합니다.
+- **Vault 플러그인 관리 계정**: `kafka-init`이 SCRAM 사용자 `vault_admin`을 만들고, 브로커 `super.users`에 등록합니다. `vault-init`은 동일 비밀번호로 `kafka/config`에 SASL 관리 클라이언트를 설정합니다. 운영에서는 강한 비밀번호와 최소 권한 모델을 사용하세요.
 
 ## 참고
 
 - OAuth/Kerberos는 **v1 스코프에서 제외**했습니다(대개 외부 IdP/KDC 의존).
-
-lease_id             kafka/creds/ci/4MhUj69WMxASYEHxZMA1b43v
-lease_duration       10m
-lease_renewable      false
-auth_type            scram
-bootstrap_servers    localhost:19093
-group_prefix         vaulttest-
-mode                 dynamic
-password             NjVlkTkrkyqpbxWyEBQjfOH5zqqREvwS
-sasl_mechanism       SCRAM-SHA-256
-security_protocol    SASL_PLAINTEXT
-topic                test-topic
-username             vault_ci_6A3cP2lF

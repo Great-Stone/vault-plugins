@@ -14,14 +14,29 @@ services:
   kafka-init:
     image: apache/kafka:4.2.0
     container_name: kafka-init
+    environment:
+      # SCRAM password for Kafka admin user `vault_admin` (must match vault-init kafka/config).
+      VAULT_KAFKA_ADMIN_PASSWORD: ${VAULT_KAFKA_ADMIN_PASSWORD:-vault-admin-demo-secret}
     depends_on:
       - kafka
     working_dir: /opt/kafka/bin
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
+        echo "Waiting for Kafka broker..."
+        i=0
+        until ./kafka-broker-api-versions.sh --bootstrap-server kafka:9092 >/dev/null 2>&1; do
+          i=$$((i + 1))
+          if [ "$$i" -gt 60 ]; then echo "Kafka not ready"; exit 1; fi
+          sleep 1
+        done
         ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
           --topic test-topic --partitions 1 --replication-factor 1
+        # SCRAM admin for the Vault plugin — must succeed (do not ignore errors).
+        echo "Creating SCRAM credentials for vault_admin..."
+        ./kafka-configs.sh --bootstrap-server kafka:9092 --alter \
+          --add-config "SCRAM-SHA-256=[iterations=4096,password=$${VAULT_KAFKA_ADMIN_PASSWORD}]" \
+          --entity-type users --entity-name vault_admin
         # Create a SCRAM user used by the static rotation demo role (app_scram).
         ./kafka-configs.sh --bootstrap-server kafka:9092 --alter \
           --add-config "SCRAM-SHA-256=[iterations=4096,password=static-initial-pass]" \
@@ -65,6 +80,7 @@ services:
     environment:
       VAULT_ADDR: http://vault:8200
       VAULT_TOKEN: root
+      VAULT_KAFKA_ADMIN_PASSWORD: ${VAULT_KAFKA_ADMIN_PASSWORD:-vault-admin-demo-secret}
       PLUGIN_NAME: vault-plugin-secrets-kafka
       PLUGIN_PATH: /vault/plugins/vault-plugin-secrets-kafka
       APPROLE_OUT_DIR: /out

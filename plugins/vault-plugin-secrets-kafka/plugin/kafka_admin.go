@@ -30,15 +30,17 @@ func newAdminClient(ctx context.Context, cfg *kafkaConfig) (*adminClient, error)
 	secProto := strings.ToUpper(strings.TrimSpace(cfg.SecurityProtocol))
 	mech := strings.ToUpper(strings.TrimSpace(cfg.SaslMechanism))
 	if secProto == "SASL_PLAINTEXT" || secProto == "SASL_SSL" {
-		if cfg.AdminUsername == "" || cfg.AdminPassword == "" {
+		adminUser := strings.TrimSpace(cfg.AdminUsername)
+		adminPass := strings.TrimSpace(cfg.AdminPassword)
+		if adminUser == "" || adminPass == "" {
 			return nil, fmt.Errorf("admin_username/admin_password required for %s", secProto)
 		}
 		if mech == "" {
 			mech = "SCRAM-SHA-256"
 		}
 		c.Net.SASL.Enable = true
-		c.Net.SASL.User = cfg.AdminUsername
-		c.Net.SASL.Password = cfg.AdminPassword
+		c.Net.SASL.User = adminUser
+		c.Net.SASL.Password = adminPass
 		switch mech {
 		case "SCRAM-SHA-256":
 			c.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA256

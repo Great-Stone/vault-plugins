@@ -15,11 +15,15 @@ if ! vault secrets list -format=json | grep -q "\"kafka/\""; then
   vault secrets enable -path=kafka "${PLUGIN_NAME}"
 fi
 
+# Kafka admin: SCRAM user `vault_admin` is created in kafka-init (must match password).
+: "${VAULT_KAFKA_ADMIN_PASSWORD:=vault-admin-demo-secret}"
 vault write kafka/config \
   bootstrap_servers="kafka:9093" \
-  admin_bootstrap_servers="kafka:9092" \
-  security_protocol="" \
-  sasl_mechanism=""
+  admin_bootstrap_servers="kafka:9093" \
+  security_protocol="SASL_PLAINTEXT" \
+  sasl_mechanism="SCRAM-SHA-256" \
+  admin_username="vault_admin" \
+  admin_password="${VAULT_KAFKA_ADMIN_PASSWORD}"
 
 vault write kafka/roles/ci \
   name="ci" \

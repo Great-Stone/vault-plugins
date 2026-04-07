@@ -77,20 +77,36 @@ vault secrets enable -path=kafka -plugin-name=vault-plugin-secrets-kafka plugin
 
 ### `kafka/config`
 
-At minimum you configure bootstrap endpoints for clients and admin operations.
+Configure bootstrap addresses for **clients** (issued credential bundles use `bootstrap_servers`) and for **admin** operations (SCRAM user lifecycle, ACLs, static rotation). You also need a Vault token with permission to write `kafka/config`; this path does **not** authenticate to Kafka by itself—it only stores settings the plugin uses when it connects later.
 
-If you want to run the local Kafka from:
+| Field | Description |
+|---|---|
+| `bootstrap_servers` | Brokers for application clients (returned in creds). |
+| `admin_bootstrap_servers` | Brokers for the plugin’s Admin API client (defaults to `bootstrap_servers` if empty). |
+| `security_protocol` | Optional. For SASL admin (typical in production), set `SASL_PLAINTEXT` or `SASL_SSL` and set `admin_username` / `admin_password`. |
+| `sasl_mechanism` | e.g. `SCRAM-SHA-256` when using SASL for the admin client. |
+| `admin_username` / `admin_password` | Kafka identity the plugin uses for **admin** RPCs. Required when `security_protocol` is `SASL_PLAINTEXT` or `SASL_SSL` (see plugin code). |
+
+**Production-oriented Kafka** usually requires authentication for both client and admin traffic. Grant the admin principal only what it needs (create/delete SCRAM users, ACLs). The Docker Compose example creates a dedicated SCRAM user `vault_admin`, registers it as a **super user** in `server.properties` for simplicity, and passes the same password to Vault via `VAULT_KAFKA_ADMIN_PASSWORD` so `kafka/config` can use SASL for admin calls. Replace this pattern with your org’s least-privilege model in real deployments.
+
+If you run the local Kafka stack and talk to it from the **host** (mapped ports `19092` / `19093`):
 
 ```bash
 cd examples/docker-compose
-docker compose up kafka kafka-init
+docker compose up -d kafka kafka-init
 ```
 
 ```bash
 vault write kafka/config \
   bootstrap_servers="localhost:19093" \
-  admin_bootstrap_servers="localhost:19092"
+  admin_bootstrap_servers="localhost:19093" \
+  security_protocol="SASL_PLAINTEXT" \
+  sasl_mechanism="SCRAM-SHA-256" \
+  admin_username="vault_admin" \
+  admin_password="vault-admin-demo-secret"
 ```
+
+Use the same `admin_password` you set in `VAULT_KAFKA_ADMIN_PASSWORD` when starting Compose (default shown above). For an unsecured admin listener (lab only), some deployments use PLAINTEXT admin and omit SASL fields; the plugin then connects without `admin_username` / `admin_password` only when `security_protocol` is not SASL.
 
 ### Dynamic roles: `kafka/roles/<name>`
 
@@ -239,6 +255,8 @@ The stack includes:
 - **Kafka** (`apache/kafka:4.2.0`) configured via a mounted `server.properties`
 - **vault-init**: registers/enables the plugin, writes `kafka/config`, and creates roles (e.g. `ci`, `ci_fast`)
 - **spring-app**: uses **Spring Cloud Vault (Config Data) + token** via configtree-mounted `token` (minted once by `vault-init` using AppRole)
+
+**Kafka admin identity (compose example):** `kafka-init` creates a SCRAM user `vault_admin` (password from `VAULT_KAFKA_ADMIN_PASSWORD`, default `vault-admin-demo-secret`) and the broker lists `User:vault_admin` under `super.users` so Admin API calls used by the plugin (SCRAM upsert/delete, ACLs) succeed without hand-tuned ACLs. `vault-init` writes the same password into `kafka/config` as `admin_username` / `admin_password` with `SASL_PLAINTEXT` + `SCRAM-SHA-256`. Override the env var for a stronger secret in real use; prefer least-privilege ACLs instead of `super.users` in production.
 
 ## Notes
 
