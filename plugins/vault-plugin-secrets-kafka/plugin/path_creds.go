@@ -31,7 +31,7 @@ func pathStaticCreds(b *backend) *framework.Path {
 			},
 		},
 		HelpSynopsis:    "Return Kafka static credential bundle for a role",
-		HelpDescription: "Returns the stored credential bundle for the given static role. For auth_type=scram, the password is rotated by the scheduler according to rotation_cron on the role. Vault lease TTL for this response is fixed by the plugin (not related to rotation).",
+		HelpDescription: "Returns the stored credential bundle for the given static role. For auth_type=scram, the password is rotated by the scheduler according to rotation_cron on the role; rotation_ttl is seconds until next_rotation_at (0 if overdue or not yet scheduled). Vault lease TTL on the response is separate (fixed by the plugin).",
 	}
 }
 
@@ -66,6 +66,8 @@ func (b *backend) pathStaticCredsRead(ctx context.Context, req *logical.Request,
 		saslMech = "n/a"
 	}
 
+	now := time.Now().UTC()
+
 	out := map[string]interface{}{
 		"mode":              "static",
 		"auth_type":         string(role.AuthType),
@@ -77,6 +79,9 @@ func (b *backend) pathStaticCredsRead(ctx context.Context, req *logical.Request,
 		"properties":        role.StaticProps,
 		"last_rotated_at":   role.LastRotatedAt,
 		"next_rotation_at":  role.NextRotationAt,
+	}
+	if role.AuthType == authScram {
+		out["rotation_ttl"] = rotationRemainingSeconds(role.NextRotationAt, now)
 	}
 	if role.AuthType == authPlain {
 		// For PLAIN, if config doesn't specify, default to SASL_PLAINTEXT.
@@ -265,4 +270,25 @@ func (b *backend) pathCredsRead(ctx context.Context, req *logical.Request, data 
 	resp.Secret.TTL = leaseTTL
 	resp.Secret.MaxTTL = time.Duration(role.MaxTTL) * time.Second
 	return resp, nil
+}
+
+// rotationRemainingSeconds returns whole seconds until nextRotationAt (RFC3339 / RFC3339Nano).
+// Returns 0 if the timestamp is missing, invalid, or already in the past.
+func rotationRemainingSeconds(nextRotationAt string, now time.Time) int {
+	tStr := strings.TrimSpace(nextRotationAt)
+	if tStr == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, tStr)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, tStr)
+	}
+	if err != nil {
+		return 0
+	}
+	d := t.Sub(now)
+	if d <= 0 {
+		return 0
+	}
+	return int(d / time.Second)
 }
