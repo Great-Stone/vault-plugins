@@ -20,7 +20,7 @@ type machineConfig struct {
 	DefaultWinRMPort   int  `json:"default_winrm_port,omitempty"`
 	WinRMUseHTTPS      bool `json:"winrm_use_https"`
 	WinRMSkipTLSVerify bool `json:"winrm_skip_tls_verify"`
-	// WinRMAuth controls auth scheme for WinRM: "basic" (default) or "ntlm".
+	// WinRMAuth controls auth scheme for WinRM: "basic" (default), "negotiate" (treated as NTLM), or "ntlm".
 	WinRMAuth string `json:"winrm_auth,omitempty"`
 }
 
@@ -51,6 +51,8 @@ func (c *machineConfig) effectiveWinRMAuth() string {
 		return "basic"
 	}
 	switch normalizeOS(c.WinRMAuth) {
+	case "negotiate":
+		return "negotiate"
 	case "ntlm":
 		return "ntlm"
 	default:
@@ -68,7 +70,7 @@ type machineConfigProfile struct {
 	// WinRM settings (Windows)
 	WinRMUseHTTPS      bool   `json:"winrm_use_https,omitempty"`
 	WinRMSkipTLSVerify bool   `json:"winrm_skip_tls_verify,omitempty"`
-	WinRMAuth          string `json:"winrm_auth,omitempty"` // basic|ntlm
+	WinRMAuth          string `json:"winrm_auth,omitempty"` // basic|negotiate|ntlm (negotiate treated as ntlm)
 
 	// SSH/WinRM privileged credential (Linux/Windows)
 	AdminUsername             string `json:"admin_username"`
@@ -108,6 +110,8 @@ func (p *machineConfigProfile) effectivePort(defaults *machineConfig, osLower st
 func (p *machineConfigProfile) effectiveWinRMAuth(defaults *machineConfig) string {
 	if p != nil && strings.TrimSpace(p.WinRMAuth) != "" {
 		switch normalizeOS(p.WinRMAuth) {
+		case "negotiate":
+			return "negotiate"
 		case "ntlm":
 			return "ntlm"
 		default:

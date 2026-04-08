@@ -39,6 +39,10 @@ func rotateWindowsPassword(ctx context.Context, authType string, host string, po
 	switch strings.ToLower(strings.TrimSpace(authType)) {
 	case "", "basic":
 		// default transport uses HTTP Basic auth
+	case "negotiate":
+		// Treat "negotiate" as NTLM. The underlying library supports an explicit NTLM transport
+		// decorator; this maps better to typical WinRM Negotiate setups for local accounts.
+		params.TransportDecorator = func() winrm.Transporter { return &winrm.ClientNTLM{} }
 	case "ntlm":
 		params.TransportDecorator = func() winrm.Transporter { return &winrm.ClientNTLM{} }
 	default:
@@ -52,6 +56,12 @@ func rotateWindowsPassword(ctx context.Context, authType string, host string, po
 	var stdout, stderr bytes.Buffer
 	exitCode, err := client.RunWithContext(ctx, cmd, &stdout, &stderr)
 	if err != nil {
+		// masterzen/winrm sometimes returns "401 - invalid content type" when auth fails and
+		// the server responds with a non-SOAP body (often HTML). Add a hint.
+		msg := err.Error()
+		if strings.Contains(msg, "401 - invalid content type") {
+			return fmt.Errorf("winrm run: %w (hint: auth may be denied; try winrm_auth=ntlm)", err)
+		}
 		return fmt.Errorf("winrm run: %w", err)
 	}
 	if exitCode != 0 {

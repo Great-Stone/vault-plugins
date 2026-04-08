@@ -110,7 +110,7 @@ Vault Database secrets 엔진의 `config/<name>`처럼, **호스트/전송(SSH/W
 | `sudo_password` | string | 아니오 | `...` | Linux 전용(Passwordless sudo가 없을 때) |
 | `winrm_use_https` | bool | 아니오 | `true` | Windows 전용 |
 | `winrm_skip_tls_verify` | bool | 아니오 | `true` | Windows 전용(연구용) |
-| `winrm_auth` | string | 아니오 | `basic` / `ntlm` | Windows 전용 |
+| `winrm_auth` | string | 아니오 | `basic` / `negotiate` / `ntlm` | Windows 전용. Basic이 정책으로 막히는 경우 `negotiate`(NTLM로 처리) 권장 |
 | `root_rotation_cron` | string | 아니오 | `0 */12 * * *` | (선택) 관리자 계정(admin_username) 자체 비밀번호 로테이션. **admin_password 필요(`admin_private_key`와는 함께 사용할 수 없음)** |
 
 예시(Linux 프로필 + SSH 키 인증):
@@ -134,7 +134,7 @@ vault write machine/config/win_lab \
   port=5985 \
   admin_username="vault-admin" \
   admin_password="<vault-admin-password>" \
-  winrm_auth=basic
+  winrm_auth=negotiate
 ```
 
 ### 정적 role: `machine/static-roles/<name>`
@@ -208,8 +208,37 @@ vault read machine/static-creds/linux_app
 
 - **비밀 커밋 금지**: 실제 호스트/IP/계정/비밀번호를 저장소에 넣지 마세요. 문서/예제는 반드시 플레이스홀더만 사용하세요.
 - **SSH host key 검증**: v1은 PoC 편의상 `InsecureIgnoreHostKey`를 사용합니다. 운영에서는 host key pinning/검증이 필요합니다.
-- **WinRM TLS**: HTTPS + 정상 인증서를 권장합니다. `winrm_skip_tls_verify` / `winrm_insecure`는 연구용으로만 사용하세요.
+- **WinRM TLS**: HTTPS + 정상 인증서를 권장합니다. `winrm_skip_tls_verify`는 연구용으로만 사용하세요.
 - **권한 모델**: 로테이션을 위해서는 관리자 권한 계정이 필요합니다. `admin_password`(및 `sudo_password`)는 매우 민감 정보로 취급하세요.
+
+## Linux: SSH 비밀번호 로그인(선택)
+
+이 플러그인은 Linux에서 `chpasswd`로 **로컬 비밀번호를 변경**합니다. 하지만 많은 배포판/클라우드 이미지는 SSH가 기본적으로 **비밀번호 인증을 비활성화**(키 인증만 허용)하는 경우가 있습니다. 이 경우 비밀번호가 정상적으로 로테이션되어도 `ssh user@host`로는 로그인 검증이 실패할 수 있습니다.
+
+### 특정 사용자에만 비밀번호 로그인 허용
+
+`sshd_config`의 `Match User`를 사용하면 특정 사용자에만 `PasswordAuthentication yes`를 적용할 수 있습니다.
+
+예시(관리자 권한):
+
+```bash
+sudo mkdir -p /etc/ssh/sshd_config.d
+
+sudo sh -c 'cat >/etc/ssh/sshd_config.d/99-vault-machine-test.conf <<'"'"'EOF'"'"'
+Match User <vault-machine-test-user>
+  PasswordAuthentication yes
+  KbdInteractiveAuthentication yes
+  UsePAM yes
+EOF'
+
+sudo systemctl restart sshd
+```
+
+클라이언트에서 비밀번호 인증만 강제해 테스트하려면:
+
+```bash
+ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no <vault-machine-test-user>@<linux-host>
+```
 
 ## Windows 사전 준비(WinRM)
 
@@ -226,6 +255,23 @@ Add-LocalGroupMember -Group "Administrators" -Member "vault-admin"
 
 Vault role에서는 `admin_username="vault-admin"`(필요 시 `.\vault-admin`)로 사용합니다.
 
+### 정적 role 대상 계정 생성(예: `vault-machine-test`)
+
+`machine/static-roles/<name>`의 `username`으로 지정할 **대상 로컬 계정**은 Windows에 미리 존재해야 합니다.
+
+관리자 PowerShell 예시:
+
+```powershell
+# 대상 계정 생성(예: vault-machine-test)
+New-LocalUser -Name "vault-machine-test" -Password (ConvertTo-SecureString "<INITIAL_PASSWORD>" -AsPlainText -Force)
+```
+
+RDP로 직접 로그인 검증까지 하려면(선택), 원격 데스크톱 로그온 권한이 필요합니다. 가장 간단한 방법은 `Remote Desktop Users` 그룹에 추가하는 것입니다.
+
+```powershell
+Add-LocalGroupMember -Group "Remote Desktop Users" -Member "vault-machine-test"
+```
+
 ### WinRM 활성화 및 Basic 허용(연구/PoC 용도)
 
 WinRM 보안 설정은 환경별로 다릅니다. *연구/PoC* 기준으로는 보통 다음이 필요합니다.
@@ -234,6 +280,14 @@ WinRM 보안 설정은 환경별로 다릅니다. *연구/PoC* 기준으로는 �
 - 방화벽에서 WinRM(5985/5986) 인바운드 허용
 - Basic 인증 허용(HTTP Basic을 쓸 경우)
 - HTTP(5985)를 쓸 때만 unencrypted 허용(가능하면 HTTPS 권장)
+
+#### (중요) 계정 잠금(Lockout)으로 인한 `Access is denied` 주의
+
+WinRM/PowerShell Remoting 인증 실패가 여러 번 누적되면, 대상 Windows의 로컬 계정(예: `vault-admin`)이 **잠김(locked out)** 상태가 되어 `Access is denied (0x80070005)`처럼 보일 수 있습니다.
+
+- 잠금 여부 확인: `net user vault-admin`에서 `Account active`가 `Locked`인지 확인
+- 잠금 정책 확인: `net accounts`에서 lockout threshold/duration 확인
+- 연구/PoC에서는 로컬 계정에 **비밀번호가 반드시 설정**되어 있어야 합니다(`Password required`가 `No`로 나오면 의도치 않은 설정일 수 있음)
 
 예시 PowerShell(관리자 권한):
 

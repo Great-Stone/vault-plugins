@@ -311,6 +311,8 @@ func windowsUserExists(ctx context.Context, authType string, host string, port i
 	params := *winrm.DefaultParameters
 	switch strings.ToLower(strings.TrimSpace(authType)) {
 	case "", "basic":
+	case "negotiate":
+		params.TransportDecorator = func() winrm.Transporter { return &winrm.ClientNTLM{} }
 	case "ntlm":
 		params.TransportDecorator = func() winrm.Transporter { return &winrm.ClientNTLM{} }
 	default:
@@ -324,6 +326,10 @@ func windowsUserExists(ctx context.Context, authType string, host string, port i
 	var stdoutBuf, stderrBuf strings.Builder
 	exitCode, err := client.RunWithContext(ctx, cmd, &stdoutBuf, &stderrBuf)
 	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "401 - invalid content type") {
+			return fmt.Errorf("winrm run: %w (hint: auth may be denied; set winrm_auth=ntlm)", err)
+		}
 		return fmt.Errorf("winrm run: %w", err)
 	}
 	if exitCode != 0 {

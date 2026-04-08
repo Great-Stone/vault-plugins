@@ -58,6 +58,7 @@ func (b *backend) paths() []*framework.Path {
 		pathConfigProfiles(b),
 		pathConfigProfileList(b),
 		pathStaticRoles(b),
+		pathStaticRoleRotate(b),
 		pathStaticRoleList(b),
 		pathStaticCreds(b),
 	}

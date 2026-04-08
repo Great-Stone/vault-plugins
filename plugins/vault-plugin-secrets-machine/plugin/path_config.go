@@ -34,7 +34,7 @@ func pathConfig(b *backend) *framework.Path {
 			},
 			"winrm_auth": {
 				Type:        framework.TypeString,
-				Description: "WinRM auth scheme: basic (default) or ntlm.",
+				Description: "WinRM auth scheme: basic (default), negotiate, or ntlm.",
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
