@@ -186,6 +186,11 @@ func (b *backend) pathConfigProfileWrite(ctx context.Context, req *logical.Reque
 		if _, err := parser.Parse(p.RootRotationCron); err != nil {
 			return logical.ErrorResponse("invalid root_rotation_cron: %v", err), nil
 		}
+		// Root rotation is password-only. If the profile is configured for SSH key auth, fail fast
+		// to avoid ambiguous behavior (we would still need to persist admin_password for next runs).
+		if strings.TrimSpace(p.AdminPrivateKey) != "" {
+			return logical.ErrorResponse("root_rotation_cron is not supported when admin_private_key is set; configure admin_password instead"), nil
+		}
 		// Root rotation only supported when password auth is available (we rotate the password).
 		if strings.TrimSpace(p.AdminPassword) == "" {
 			return logical.ErrorResponse("root_rotation_cron requires admin_password (cannot rotate private key)"), nil

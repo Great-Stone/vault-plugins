@@ -24,6 +24,13 @@ English documentation (영문): [`README.md`](./README.md)
 - Vault(플러그인 지원)
 - Vault 플러그인 프로세스에서 대상 호스트로의 네트워크 연결(SSH/WinRM)
 
+### 지원 Windows 버전
+
+로테이션은 PowerShell `Set-LocalUser`를 사용합니다. 일반적으로 아래 버전에서 동작합니다.
+
+- Windows 10 / 11
+- Windows Server 2016 / 2019 / 2022
+
 ## 빌드
 
 이 디렉터리에서:
@@ -104,7 +111,18 @@ Vault Database secrets 엔진의 `config/<name>`처럼, **호스트/전송(SSH/W
 | `winrm_use_https` | bool | 아니오 | `true` | Windows 전용 |
 | `winrm_skip_tls_verify` | bool | 아니오 | `true` | Windows 전용(연구용) |
 | `winrm_auth` | string | 아니오 | `basic` / `ntlm` | Windows 전용 |
-| `root_rotation_cron` | string | 아니오 | `0 */12 * * *` | (선택) 관리자 계정(admin_username) 자체 비밀번호 로테이션. **admin_password 필요** |
+| `root_rotation_cron` | string | 아니오 | `0 */12 * * *` | (선택) 관리자 계정(admin_username) 자체 비밀번호 로테이션. **admin_password 필요(`admin_private_key`와는 함께 사용할 수 없음)** |
+
+예시(Linux 프로필 + SSH 키 인증):
+```bash
+vault write machine/config/linux_lab \
+  name=linux_lab \
+  os=linux \
+  host="<linux-host>" \
+  port=22 \
+  admin_username="<ssh-admin>" \
+  admin_private_key=@/path/to/id_rsa
+```
 
 예시(Windows 프로필 + 전용 관리자 계정):
 
@@ -121,11 +139,10 @@ vault write machine/config/win_lab \
 
 ### 정적 role: `machine/static-roles/<name>`
 
-정적 role 하나는 **“특정 host의 특정 로컬 계정”**을 의미합니다.
+정적 role 하나는 **“특정 로컬 계정”**을 의미하며, 반드시 `config/<name>` 연결 프로필을 참조해야 합니다.
 
-- **host**: 대상 머신 주소
 - **username**: Vault가 비밀번호를 보관/로테이션하는 로컬 계정
-- **admin_username/admin_password 또는 admin_private_key**: 비밀번호 변경 권한이 있는 관리자 계정(SSH/WinRM 접속용)
+- **config/<name>**: 대상 host/전송(SSH/WinRM) + 비밀번호 변경 권한이 있는 관리자(root credential) 설정
 - **rotation_cron**: UTC cron 로테이션 주기
 
 스케줄러는 일정 주기마다 due 여부를 확인하고, due이면 원격에서 비밀번호를 실제 변경한 뒤 Vault 저장소의 값을 갱신합니다. `static-creds`의 Vault 리스 TTL은 **로테이션 시점과 무관**하며, 응답은 “북키핑(lease bookkeeping)” 성격입니다.
@@ -134,40 +151,42 @@ vault write machine/config/win_lab \
 
 | 필드 | 타입 | 필수 | 예시 | 설명/주의 |
 |---|---:|:---:|---|---|
-| `config_name` | string | 아니오 | `win_lab` | 설정 시 `config/<name>`에서 host/전송/admin 설정을 상속 |
-| `os` | string | 예 | `linux` / `windows` | OS에 따라 SSH/WinRM 경로 선택 |
-| `host` | string | 예 | `host.example.internal` | Vault 플러그인 프로세스에서 접근 가능해야 함 |
-| `port` | int | 아니오 | `22` / `5985` / `5986` | 생략/0이면 `machine/config` 또는 기본값 사용 |
-| `username` | string | 예 | `appuser` | 관리 대상 계정(비밀번호가 `static-creds`에 반환) |
+| `config_name` | string | **예** | `win_lab` | `config/<name>`에서 host/전송/admin 설정을 상속 |
+| `username` | string | **예** | `appuser` | 관리 대상 계정(비밀번호가 `static-creds`에 반환) |
+| `validate_user_exists` | bool | 아니오 | `true` | 설정 시, role write 시점에 대상 호스트에 `username`이 실제로 존재하는지 검증합니다(`config/<name>`의 관리자 계정으로 조회). |
 | `password` | string | 아니오 | `...` | 초기값(선택). 없으면 첫 로테이션 성공 후 채워짐 |
-| `admin_username` | string | 예 | `vaultadmin` | 비밀번호 변경 권한이 있는 관리자 계정 |
-| `admin_password` | string | 경우에 따라 | `...` | 관리자 계정 비밀번호(SSH/WinRM). Linux는 `admin_private_key`로 대체 가능 |
-| `admin_private_key` | string | 경우에 따라 | `-----BEGIN...` | Linux SSH 키 인증용 PEM private key (설정 시 admin_password 대신 사용 가능) |
-| `admin_private_key_passphrase` | string | 아니오 | `...` | private key passphrase(있는 경우) |
-| `sudo_password` | string | 아니오 | `...` | Linux 전용: passwordless sudo가 없을 때 `sudo -S`에 사용 |
-| `winrm_insecure` | bool | 아니오 | `true` | role 단위 TLS 검증 생략(엔진 설정과 합산) |
-| `winrm_auth` | string | 아니오 | `basic` / `ntlm` | WinRM 인증 방식 오버라이드(기본: basic). 환경에 따라 `ntlm`이 필요할 수 있음 |
-| `rotation_cron` | string | 예 | `0 */6 * * *` | UTC cron |
+| `rotation_cron` | string | **예** | `0 */6 * * *` | UTC cron |
 
-예시(Linux / SSH):
+예시(Linux에서 테스트용 대상 계정 생성):
+
+```bash
+sudo useradd -m "<target-user>" || true
+sudo passwd "<target-user>"
+```
+
+예시(Linux / SSH, 연결 프로필 기반):
 
 ```bash
 vault write machine/static-roles/linux_app \
-  os="linux" \
-  host="<linux-host>" \
-  port=22 \
+  config_name="linux_lab" \
   username="<target-user>" \
-  admin_username="<ssh-admin>" \
-  admin_private_key=@/path/to/id_rsa \
+  validate_user_exists=true \
   rotation_cron="*/5 * * * *"
 ```
 
-예시(Windows / WinRM):
+예시(Windows에서 테스트용 대상 계정 생성):
+
+```powershell
+New-LocalUser -Name "<target-user>" -Password (ConvertTo-SecureString "<INITIAL_PASSWORD>" -AsPlainText -Force)
+```
+
+예시(Windows / WinRM, 연결 프로필 기반):
 
 ```bash
 vault write machine/static-roles/win_app \
   config_name="win_lab" \
   username="<target-user>" \
+  validate_user_exists=true \
   rotation_cron="0 */6 * * *"
 ```
 
@@ -194,23 +213,7 @@ vault read machine/static-creds/linux_app
 
 ## Windows 사전 준비(WinRM)
 
-WinRM은 환경별 정책에 따라 **Basic 인증이 거부**되거나, `Administrator` 계정이 원격에서 막히는 경우가 있습니다. v1에서는 기본적으로 `basic`을 사용하되, 필요 시 `winrm_auth=ntlm`로 전환할 수 있습니다(환경에 따라 권장).
-
-### 기본 Administrator 계정 활성화(예시)
-
-Windows에서 관리자 권한으로 CMD를 실행 후:
-
-```bat
-net user administrator /active:yes
-```
-
-암호 설정/변경:
-
-```bat
-net user administrator <새암호>
-```
-
-### 권장: 전용 로컬 관리자 계정 생성(vault-admin)
+### 전용 로컬 관리자 계정 생성(vault-admin)
 
 운영/검증 편의를 위해 built-in `Administrator` 대신 전용 계정(예: `vault-admin`)을 만들어 사용하는 것을 권장합니다.
 
@@ -243,11 +246,4 @@ winrm set winrm/config/client '@{AllowUnencrypted="true"}'
 ```
 
 HTTPS(권장) 사용 시에는 5986 리스너를 인증서로 구성하고, `AllowUnencrypted`는 꺼 둔 상태를 권장합니다.
-
-### 지원 Windows 버전
-
-로테이션은 PowerShell `Set-LocalUser`를 사용합니다. 일반적으로 아래 버전에서 동작합니다.
-
-- Windows 10 / 11
-- Windows Server 2016 / 2019 / 2022
 
