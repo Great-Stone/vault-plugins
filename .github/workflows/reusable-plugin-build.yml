@@ -23,19 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-plugin-build
         with:
-          go-version-file: plugins/${{ inputs.plugin }}/go.mod
-          cache-dependency-path: plugins/${{ inputs.plugin }}/go.sum
-
-      - name: Go test (native)
-        working-directory: plugins/${{ inputs.plugin }}
-        run: go test ./...
-
-      - name: Go build (cross-compile)
-        working-directory: plugins/${{ inputs.plugin }}
-        env:
-          GOOS: ${{ inputs.goos }}
-          GOARCH: ${{ inputs.goarch }}
-          CGO_ENABLED: "0"
-        run: go build -o "${RUNNER_TEMP}/plugin-binary" "./cmd/${{ inputs.plugin }}"
+          plugin: ${{ inputs.plugin }}
+          goos: ${{ inputs.goos }}
+          goarch: ${{ inputs.goarch }}
+          output: ${{ runner.temp }}/plugin-binary

@@ -1,0 +1,36 @@
+name: Go plugin test/build
+description: Run go test and cross-build a Vault plugin in plugins/<plugin>.
+
+inputs:
+  plugin:
+    description: Plugin directory name under plugins/
+    required: true
+  goos:
+    required: true
+  goarch:
+    required: true
+  output:
+    description: Output path for the built binary
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: plugins/${{ inputs.plugin }}/go.mod
+        cache-dependency-path: plugins/${{ inputs.plugin }}/go.sum
+
+    - name: Go test (native)
+      shell: bash
+      working-directory: plugins/${{ inputs.plugin }}
+      run: go test ./...
+
+    - name: Go build (cross-compile)
+      shell: bash
+      working-directory: plugins/${{ inputs.plugin }}
+      env:
+        GOOS: ${{ inputs.goos }}
+        GOARCH: ${{ inputs.goarch }}
+        CGO_ENABLED: "0"
+      run: go build -o "${{ inputs.output }}" "./cmd/${{ inputs.plugin }}"

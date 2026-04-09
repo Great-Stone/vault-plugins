@@ -1,0 +1,244 @@
+name: Release plugins
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (e.g. v1.2.3 or 1.2.3)
+        required: true
+        type: string
+      draft:
+        description: Create as draft release
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: Build only; do not push tag or create GitHub Release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.plugin_short }} ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # kafka
+          - plugin: vault-plugin-secrets-kafka
+            plugin_short: kafka
+            goos: linux
+            goarch: amd64
+            exe: ""
+          - plugin: vault-plugin-secrets-kafka
+            plugin_short: kafka
+            goos: linux
+            goarch: arm
+            exe: ""
+          - plugin: vault-plugin-secrets-kafka
+            plugin_short: kafka
+            goos: linux
+            goarch: arm64
+            exe: ""
+          - plugin: vault-plugin-secrets-kafka
+            plugin_short: kafka
+            goos: windows
+            goarch: amd64
+            exe: ".exe"
+          - plugin: vault-plugin-secrets-kafka
+            plugin_short: kafka
+            goos: windows
+            goarch: arm64
+            exe: ".exe"
+          - plugin: vault-plugin-secrets-kafka
+            plugin_short: kafka
+            goos: darwin
+            goarch: arm64
+            exe: ""
+
+          # machine
+          - plugin: vault-plugin-secrets-machine
+            plugin_short: machine
+            goos: linux
+            goarch: amd64
+            exe: ""
+          - plugin: vault-plugin-secrets-machine
+            plugin_short: machine
+            goos: linux
+            goarch: arm
+            exe: ""
+          - plugin: vault-plugin-secrets-machine
+            plugin_short: machine
+            goos: linux
+            goarch: arm64
+            exe: ""
+          - plugin: vault-plugin-secrets-machine
+            plugin_short: machine
+            goos: windows
+            goarch: amd64
+            exe: ".exe"
+          - plugin: vault-plugin-secrets-machine
+            plugin_short: machine
+            goos: windows
+            goarch: arm64
+            exe: ".exe"
+          - plugin: vault-plugin-secrets-machine
+            plugin_short: machine
+            goos: darwin
+            goarch: arm64
+            exe: ""
+
+          # github
+          - plugin: vault-plugin-secrets-github
+            plugin_short: github
+            goos: linux
+            goarch: amd64
+            exe: ""
+          - plugin: vault-plugin-secrets-github
+            plugin_short: github
+            goos: linux
+            goarch: arm
+            exe: ""
+          - plugin: vault-plugin-secrets-github
+            plugin_short: github
+            goos: linux
+            goarch: arm64
+            exe: ""
+          - plugin: vault-plugin-secrets-github
+            plugin_short: github
+            goos: windows
+            goarch: amd64
+            exe: ".exe"
+          - plugin: vault-plugin-secrets-github
+            plugin_short: github
+            goos: windows
+            goarch: arm64
+            exe: ".exe"
+          - plugin: vault-plugin-secrets-github
+            plugin_short: github
+            goos: darwin
+            goarch: arm64
+            exe: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Normalize version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${{ inputs.version }}"
+          if [[ "$raw" =~ ^v ]]; then
+            ver="$raw"
+          else
+            ver="v$raw"
+          fi
+          if [[ ! "$ver" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "invalid version: $raw (expected semver like v1.2.3)" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        id: build
+        uses: ./.github/actions/go-plugin-build
+        with:
+          plugin: ${{ matrix.plugin }}
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+          output: ${{ runner.temp }}/bin/${{ matrix.plugin }}${{ matrix.exe }}
+
+      - name: Package zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ steps.v.outputs.version }}"
+          mkdir -p dist
+          asset="${{ matrix.plugin }}_${ver}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          bin="${{ runner.temp }}/bin/${{ matrix.plugin }}${{ matrix.exe }}"
+          test -f "$bin"
+          (cd "$(dirname "$bin")" && zip -9 -q "${GITHUB_WORKSPACE}/dist/$asset" "$(basename "$bin")")
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.plugin_short }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Normalize version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${{ inputs.version }}"
+          if [[ "$raw" =~ ^v ]]; then
+            ver="$raw"
+          else
+            ver="v$raw"
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect assets and write SHA256SUMS
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -maxdepth 3 -type f -name '*.zip' -print0 | xargs -0 -I{} cp "{}" dist/
+          (cd dist && sha256sum *.zip > SHA256SUMS)
+          echo "asset_dir=dist" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure tag does not already exist
+        if: ${{ inputs.dry_run == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.v.outputs.version }}"
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q "$tag"; then
+            echo "tag already exists on origin: $tag" >&2
+            exit 1
+          fi
+
+      - name: Create and push annotated tag
+        if: ${{ inputs.dry_run == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.v.outputs.version }}"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
+
+      - name: Create GitHub Release
+        if: ${{ inputs.dry_run == false }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.version }}
+          draft: ${{ inputs.draft }}
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS
