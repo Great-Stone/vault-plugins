@@ -2,7 +2,7 @@
 
 English documentation (영문): [`README.md`](./README.md)
 
-원격 머신의 **로컬 OS 계정 비밀번호를 저장하고 주기적으로 변경(로테이션)**하는 HashiCorp Vault **시크릿 엔진 플러그인**입니다.
+원격 머신의 로컬 OS 계정 비밀번호를 저장하고 주기적으로 변경(로테이션)하는 HashiCorp Vault **시크릿 엔진 플러그인**입니다.
 
 - **Linux**: **SSH**로 접속하여 `chpasswd`로 비밀번호 변경
 - **Windows**: **WinRM**으로 PowerShell `Set-LocalUser` 실행
@@ -176,8 +176,8 @@ Vault Database secrets 엔진의 `config/<name>`처럼, **호스트/전송(SSH/W
 | `host` | string | 예 | `host.example.internal` | Vault 플러그인 프로세스에서 접근 가능해야 함 |
 | `port` | int | 아니오 | `22` / `5985` / `5986` | 생략/0이면 기본값 사용 |
 | `admin_username` | string | 예 | `vault-admin` | 대상 계정 비밀번호를 바꿀 수 있는 관리자 계정 |
-| `admin_password` | string | 경우에 따라 | `...` | WinRM에는 필수. 또한 `root_rotation_cron`을 쓰려면 필수 |
-| `admin_private_key` | string | 경우에 따라 | `-----BEGIN...` | Linux SSH 키 인증(PEM). 설정 시 admin_password 대신 사용 가능 |
+| `admin_password` | string | 옵션 | `...` | WinRM에는 필수. 또한 `root_rotation_cron`을 쓰려면 필수 |
+| `admin_private_key` | string | 옵션 | `-----BEGIN...` | Linux SSH 키 인증(PEM). 설정 시 admin_password 대신 사용 가능 |
 | `admin_private_key_passphrase` | string | 아니오 | `...` | 키 passphrase(있는 경우) |
 | `sudo_password` | string | 아니오 | `...` | Linux 전용(Passwordless sudo가 없을 때) |
 | `winrm_use_https` | bool | 아니오 | `true` | Windows 전용 |
