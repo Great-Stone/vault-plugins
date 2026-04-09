@@ -1,0 +1,41 @@
+# Reusable: run tests on the runner (linux/amd64) and cross-compile the plugin binary.
+name: Reusable plugin build
+
+on:
+  workflow_call:
+    inputs:
+      plugin:
+        description: Plugin directory name under plugins/ (e.g. vault-plugin-secrets-kafka)
+        required: true
+        type: string
+      goos:
+        required: true
+        type: string
+      goarch:
+        required: true
+        type: string
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: plugins/${{ inputs.plugin }}/go.mod
+          cache-dependency-path: plugins/${{ inputs.plugin }}/go.sum
+
+      - name: Go test (native)
+        working-directory: plugins/${{ inputs.plugin }}
+        run: go test ./...
+
+      - name: Go build (cross-compile)
+        working-directory: plugins/${{ inputs.plugin }}
+        env:
+          GOOS: ${{ inputs.goos }}
+          GOARCH: ${{ inputs.goarch }}
+          CGO_ENABLED: "0"
+        run: go build -o "${RUNNER_TEMP}/plugin-binary" "./cmd/${{ inputs.plugin }}"
