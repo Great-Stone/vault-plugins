@@ -7,7 +7,7 @@ HashiCorp Vault용 커스텀 플러그인 모음입니다. 이 저장소의 플�
 | 디렉터리 | 설명 |
 |---|---|
 | `plugins/vault-plugin-secrets-kafka` | Kafka 인증용 시크릿 엔진(동적 SCRAM 발급/해지 + 정적 번들 확장 기반). 로컬 `docker compose` 예제와 Spring Boot 검증 UI 포함 |
-| `plugins/vault-plugin-secrets-machine` | 머신(로컬 OS 계정) 정적 자격증명: 비밀번호를 보관하고 SSH(Linux)·WinRM(Windows)으로 주기적 로테이션. 마운트 예: `machine/`; Database 정적 역할과 유사한 모델. 실제 호스트·계정·비밀번호는 문서/예제에 커밋하지 말고 플레이스홀더만 사용 |
+| `plugins/vault-plugin-secrets-machine` | 머신(로컬 OS 계정) 정적 자격증명: 비밀번호를 보관하고 SSH(Linux)·WinRM(Windows)으로 주기적 로테이션. 마운트 예: `machine/`; Database 정적 역할과 유사한 모델. |
 | `plugins/vault-plugin-secrets-github` | GitHub App 설치 액세스 토큰(installation access token) 발급용 시크릿 엔진 |
 
 ## 참고
