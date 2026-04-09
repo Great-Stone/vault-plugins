@@ -24,12 +24,84 @@ Assuming you mount the plugin at `machine/`:
 - Vault with plugin support
 - Network reachability from the Vault plugin process to target hosts (SSH/WinRM)
 
+### Supported Linux versions and SSH considerations
+
+The plugin connects over **SSH**, runs a **non-interactive remote command**, and uses `chpasswd` to change the password for a **local `/etc/shadow` account**. The following summarizes typical compatibility and what to expect from `sshd` and privilege configuration.
+
+**Typical compatibility**
+
+- **Distributions**: Common server Linux with **OpenSSH (`sshd`)** and **`shadow-utils`** (provides `chpasswd`), for example RHEL / Oracle Linux / Rocky / Alma **7+**, Ubuntu **18.04 LTS+**, Debian **9+**, SLES **12+**.
+- **Architecture**: Any architecture is fine as long as SSH, shell, and `chpasswd` work; independent of the Vault host’s CPU architecture.
+
+**Requirements on the target host**
+
+- `chpasswd` must be available on the remote PATH (usually via `shadow-utils`).
+- The admin account must be allowed to **run a shell command** over SSH (the plugin uses `ssh.Session.Run` with a small pipeline).
+- **Non-root admin**: either passwordless sudo must allow the `chpasswd` path (default code path uses `sudo -n ... chpasswd`), or set `sudo_password` on the connection profile so the plugin can use `sudo -S`.
+- **Root admin**: `chpasswd` runs without `sudo` (`sudo_password` not needed).
+- The managed **`username`** should be a **local** user present in `/etc/passwd` / `/etc/shadow`. Pure LDAP/NIS entries without a local shadow line may not work with `chpasswd`.
+
+**SSH / `sshd` notes**
+
+- **Port**: defaults to **22** when omitted (resolved via engine defaults, profile, and role). Ensure **TCP** from the Vault plugin host to the target is permitted.
+- **Admin authentication**: provide either `admin_private_key` (PEM) or `admin_password` (password auth). If the server only allows keys for the admin user, use a key; if only password auth, use a password.
+- **Algorithms / keys**: the client uses Go’s `golang.org/x/crypto/ssh`. Very restrictive server configs (e.g. only legacy host key types) can cause handshake failures; prefer modern host and client key types.
+- **Host key verification**: v1 skips host key verification for PoC convenience. For production, plan pinning/verification separately (see **Security and operational notes** below).
+
 ### Supported Windows versions
 
 The rotation command uses PowerShell `Set-LocalUser`, which is available on:
 
 - Windows 10 / 11
 - Windows Server 2016 / 2019 / 2022
+
+## Workflow
+
+A static role is defined by a **connection profile** (`machine/config/<name>`) and a **role** (`machine/static-roles/<role>`). Rotation runs on the plugin’s internal scheduler (it checks for due roles periodically) or immediately via **`machine/static-roles/<role>/rotate`**. On success, the new password is persisted; clients read the current bundle from **`machine/static-creds/<role>`**.
+
+### Linux (SSH → `chpasswd`)
+
+The plugin opens an **SSH session** with admin credentials, then runs a **one-shot remote command** that feeds `chpasswd` to change the target local user’s password. (Root skips `sudo`; otherwise `sudo -n` or the `sudo_password` path.)
+
+```mermaid
+sequenceDiagram
+    actor Op as Operator
+    participant V as Vault
+    participant P as Machine plugin
+    participant L as Linux(sshd)
+
+    Op->>V: Write config/<name>, static-roles/<role>
+    V->>P: Persist profile + role
+    Note over P,L: Scheduler due or /rotate
+    P->>L: SSH (admin key or password)
+    P->>L: Run remote command (chpasswd)
+    L-->>P: Result
+    P->>V: Store password + rotation timestamps on role
+    Op->>V: Read static-creds/<role>
+    V-->>Op: host, username, password, ...
+```
+
+### Windows (WinRM → `Set-LocalUser`)
+
+The plugin connects over **WinRM** with admin credentials, then runs PowerShell **`Set-LocalUser`** to change the target local user’s password.
+
+```mermaid
+sequenceDiagram
+    actor Op as Operator
+    participant V as Vault
+    participant P as Machine plugin
+    participant W as Windows(WinRM)
+
+    Op->>V: Write config/<name>, static-roles/<role>
+    V->>P: Persist profile + role
+    Note over P,W: Scheduler due or /rotate
+    P->>W: WinRM session (e.g. Basic/NTLM)
+    P->>W: Set-LocalUser
+    W-->>P: Result
+    P->>V: Store password + rotation timestamps on role
+    Op->>V: Read static-creds/<role>
+    V-->>Op: host, username, password, ...
+```
 
 ## Build
 

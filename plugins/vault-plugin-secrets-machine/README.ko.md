@@ -24,12 +24,84 @@ English documentation (영문): [`README.md`](./README.md)
 - Vault(플러그인 지원)
 - Vault 플러그인 프로세스에서 대상 호스트로의 네트워크 연결(SSH/WinRM)
 
+### 지원 Linux 버전 및 SSH 옵션 고려사항
+
+플러그인은 대상 호스트에 **SSH로 비대화형(non-interactive) 원격 명령**을 실행하고, `chpasswd`로 **로컬 `/etc/shadow` 기반 계정**의 비밀번호를 바꿉니다. 아래는 일반적인 호환 범위와 `sshd`/권한 측면에서의 고려사항입니다.
+
+**지원 범위(일반화)**
+
+- **배포판**: RHEL / Oracle Linux / Rocky / Alma **7 이상**, Ubuntu **18.04 LTS 이상**, Debian **9 이상**, SLES **12 이상** 등, **OpenSSH 서버(`sshd`)**와 **`shadow-utils`( `chpasswd` 제공)**가 있는 일반적인 서버용 Linux를 전제로 합니다.
+- **아키텍처**: x86_64 / AArch64 등 Go 빌드 타깃과 무관하게, SSH·셸·`chpasswd`가 지원되어야 합니다.
+
+**대상 호스트에 필요한 것**
+
+- `chpasswd`가 실행 가능해야 합니다(보통 `shadow-utils` 패키지).
+- 관리자 계정으로 **원격 세션에서 셸 명령 실행**이 가능해야 합니다(플러그인은 `ssh.Session.Run`으로 한 줄 파이프라인을 실행합니다).
+- **관리자가 root가 아닌 경우**: 비밀번호 없는 sudo(`sudo -n`)로 `chpasswd`까지 도달 가능하거나, 연결 프로필에 `sudo_password`를 설정해 `sudo -S` 경로를 쓸 수 있어야 합니다. (코드상 기본은 `sudo -n bash -c '... chpasswd'`입니다.)
+- **관리자가 root인 경우**: `sudo` 없이 `chpasswd`를 직접 호출합니다(`sudo_password` 불필요).
+- 로테이션 대상 `username`은 **로컬 사용자( `/etc/passwd`·`/etc/shadow`에 존재)**여야 합니다. LDAP/NIS만 있고 로컬 항목이 없는 계정은 `chpasswd` 대상으로 부적합할 수 있습니다.
+
+**SSH / `sshd` 옵션 관점**
+
+- **포트**: 생략 시 SSH 기본 **22**(엔진 기본값·프로필·role 순으로 결정). 방화벽·보안 그룹에서 플러그인( Vault 실행 호스트 )→대상 **TCP 연결**이 열려 있어야 합니다.
+- **관리자 인증**: `admin_private_key`(PEM) 또는 `admin_password`(SSH 비밀번호 인증) 중 하나가 필요합니다. 서버가 관리자에 대해 **키만 허용**하면 키를, **비밀번호만 허용**하면 비밀번호를 쓰세요.
+- **알고리즘/키 형식**: Go `golang.org/x/crypto/ssh`로 연결합니다. 매우 오래된 `ssh-rsa` 호스트 키만 허용하는 등 극단적 제한이 있으면 협상 실패할 수 있습니다(서버 호스트 키·클라이언트 키 타입을 최신 스택에 맞추는 것이 안전합니다).
+- **호스트 키 검증**: v1은 PoC 편의상 호스트 키 검증을 생략합니다. 운영에서는 별도로 신뢰할 호스트 키 고정/검증 전략이 필요합니다(아래 “보안/운영 주의사항” 참고).
+
 ### 지원 Windows 버전
 
 로테이션은 PowerShell `Set-LocalUser`를 사용합니다. 일반적으로 아래 버전에서 동작합니다.
 
 - Windows 10 / 11
 - Windows Server 2016 / 2019 / 2022
+
+## 워크플로
+
+정적 role은 **연결 프로필(`machine/config/<name>`)** 과 **역할(`machine/static-roles/<role>`)** 로 정의됩니다. 로테이션은 플러그인 내부 스케줄러(주기적으로 due 확인) 또는 **`machine/static-roles/<role>/rotate`** 로 즉시 실행할 수 있습니다. 성공 시 새 비밀번호가 저장소에 기록되고, 클라이언트는 **`machine/static-creds/<role>`** 로 현재 번들을 읽습니다.
+
+### Linux (SSH → `chpasswd`)
+
+관리자 자격으로 **SSH 세션**을 연 뒤, 원격에서 **`chpasswd`** 파이프라인을 한 번 실행해 대상 로컬 사용자의 비밀번호를 바꿉니다. (root면 `sudo` 없음, 그 외에는 `sudo -n` 또는 `sudo_password` 경로.)
+
+```mermaid
+sequenceDiagram
+    actor Op as 운영자
+    participant V as Vault
+    participant P as Machine 플러그인
+    participant L as Linux(sshd)
+
+    Op->>V: config/<name>, static-roles/<role> 쓰기
+    V->>P: 스토리지에 프로필·role 반영
+    Note over P,L: 스케줄 due 또는 /rotate
+    P->>L: SSH 연결(관리자 키 또는 비밀번호)
+    P->>L: 원격 명령 실행(chpasswd)
+    L-->>P: 결과
+    P->>V: role에 password·로테이션 시각 저장
+    Op->>V: static-creds/<role> 읽기
+    V-->>Op: host, username, password 등
+```
+
+### Windows (WinRM → `Set-LocalUser`)
+
+관리자 자격으로 **WinRM**에 연결한 뒤, PowerShell에서 **`Set-LocalUser`** 로 대상 로컬 사용자 비밀번호를 변경합니다.
+
+```mermaid
+sequenceDiagram
+    actor Op as 운영자
+    participant V as Vault
+    participant P as Machine 플러그인
+    participant W as Windows(WinRM)
+
+    Op->>V: config/<name>, static-roles/<role> 쓰기
+    V->>P: 스토리지에 프로필·role 반영
+    Note over P,W: 스케줄 due 또는 /rotate
+    P->>W: WinRM 세션(예: Basic/NTLM)
+    P->>W: Set-LocalUser 실행
+    W-->>P: 결과
+    P->>V: role에 password·로테이션 시각 저장
+    Op->>V: static-creds/<role> 읽기
+    V-->>Op: host, username, password 등
+```
 
 ## 빌드
 
