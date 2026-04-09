@@ -373,3 +373,12 @@ winrm set winrm/config/client '@{AllowUnencrypted="true"}'
 
 HTTPS(권장) 사용 시에는 5986 리스너를 인증서로 구성하고, `AllowUnencrypted`는 꺼 둔 상태를 권장합니다.
 
+## Demo
+
+### Demo 1: Linux (SSH)
+
+![Linux (SSH) Demo](../../demo/machine-secret-engine-linux.gif)
+
+### Demo 2: Windows (WinRM)
+
+![Windows (WinRM) Demo](../../demo/machine-secret-engine-windows.gif)

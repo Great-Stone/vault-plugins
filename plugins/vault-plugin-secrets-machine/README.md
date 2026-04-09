@@ -391,3 +391,12 @@ If you repeatedly try WinRM/PowerShell remoting with wrong credentials, the loca
 
 For HTTPS (recommended), configure a listener on 5986 with a valid certificate and keep `AllowUnencrypted` disabled.
 
+## Demo
+
+### Demo 1: Linux (SSH)
+
+![Linux (SSH) Demo](../../demo/machine-secret-engine-linux.gif)
+
+### Demo 2: Windows (WinRM)
+
+![Windows (WinRM) Demo](../../demo/machine-secret-engine-windows.gif)
