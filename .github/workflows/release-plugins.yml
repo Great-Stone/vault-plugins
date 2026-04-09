@@ -7,6 +7,11 @@ on:
         description: Release version (e.g. v1.2.3 or 1.2.3)
         required: true
         type: string
+      overwrite:
+        description: Overwrite existing tag/release if it already exists
+        required: false
+        default: true
+        type: boolean
       draft:
         description: Create as draft release
         required: false
@@ -224,7 +229,7 @@ jobs:
           echo "asset_dir=dist" >> "$GITHUB_OUTPUT"
 
       - name: Ensure tag does not already exist
-        if: ${{ inputs.dry_run == false }}
+        if: ${{ inputs.dry_run == false && inputs.overwrite == false }}
         shell: bash
         run: |
           set -euo pipefail
@@ -233,6 +238,24 @@ jobs:
             echo "tag already exists on origin: $tag" >&2
             exit 1
           fi
+
+      - name: Overwrite existing tag/release (if present)
+        if: ${{ inputs.dry_run == false && inputs.overwrite == true }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.v.outputs.version }}"
+
+          # Delete existing GitHub Release (ignore if missing)
+          gh release delete "$tag" -y || true
+
+          # Delete remote tag (ignore if missing)
+          git push --delete origin "$tag" || true
+
+          # Delete local tag (ignore if missing)
+          git tag -d "$tag" || true
 
       - name: Create and push annotated tag
         if: ${{ inputs.dry_run == false }}
