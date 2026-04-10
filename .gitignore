@@ -47,3 +47,8 @@ plugins/vault-plugin-secrets-kafka/examples/docker-compose/vault/plugins/vault-p
 .vscode/
 .cursor/
 
+# Swift build
+.build/
+
+# macOS .app
+.build-tmp/

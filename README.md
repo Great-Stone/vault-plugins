@@ -11,6 +11,7 @@ Korean documentation (한국어): [`README.ko.md`](./README.ko.md)
 | `plugins/vault-plugin-secrets-kafka` | Kafka auth secret engine (dynamic SCRAM issuance/revocation + a foundation for static bundles). Includes a local `docker compose` stack and a Spring Boot validation UI |
 | `plugins/vault-plugin-secrets-machine` | Machine (local OS account) static credentials: stores passwords and rotates them on a schedule over SSH (Linux) or WinRM (Windows). Mount path is typically `machine/`; model is analogous to database static roles. |
 | `plugins/vault-plugin-secrets-github` | Secret engine to mint GitHub App installation access tokens |
+| `plugins/vault-plugin-auth-mac-passkey` | Auth method to issue Vault tokens using macOS Touch ID (WebAuthn passkeys) via a local macOS helper |
 
 ## CI build status
 
