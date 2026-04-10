@@ -137,12 +137,37 @@ final class SafariWebAuthnServer {
 <script>
 const options = \(optionsJSON);
 function b64urlToBuf(b64url) {
-  const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
-  const b64 = (b64url + pad).replace(/-/g,'+').replace(/_/g,'/');
-  const str = atob(b64);
-  const bytes = new Uint8Array(str.length);
-  for (let i=0;i<str.length;i++) bytes[i] = str.charCodeAt(i);
-  return bytes.buffer;
+  if (!b64url || typeof b64url !== 'string') return null;
+  try {
+    const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
+    const b64 = (b64url + pad).replace(/-/g,'+').replace(/_/g,'/');
+    const str = atob(b64);
+    const bytes = new Uint8Array(str.length);
+    for (let i=0;i<str.length;i++) bytes[i] = str.charCodeAt(i);
+    return bytes.buffer;
+  } catch (e) { return null; }
+}
+function normalizeUserId(id) {
+  if (id === undefined || id === null) throw new TypeError('user.id is missing');
+  let buf = null;
+  if (typeof id === 'string') {
+    buf = b64urlToBuf(id);
+    if (buf && (buf.byteLength < 1 || buf.byteLength > 64)) buf = null;
+    if (!buf) {
+      const te = new TextEncoder();
+      const u = te.encode(id);
+      if (u.length >= 1 && u.length <= 64) buf = u.buffer;
+    }
+  } else if (Array.isArray(id)) {
+    const u = new Uint8Array(id);
+    if (u.length >= 1 && u.length <= 64) buf = u.buffer;
+  } else if (id instanceof ArrayBuffer) {
+    if (id.byteLength >= 1 && id.byteLength <= 64) buf = id;
+  } else if (id instanceof Uint8Array) {
+    if (id.length >= 1 && id.length <= 64) buf = id.buffer;
+  }
+  if (!buf) throw new TypeError('user.id must be 1-64 bytes after normalization');
+  return buf;
 }
 function bufToB64url(buf) {
   const bytes = new Uint8Array(buf);
@@ -178,7 +203,7 @@ async function main() {
   document.getElementById('out').textContent = 'Starting WebAuthn...';
   const pk = options.publicKey || options;
   pk.challenge = b64urlToBuf(pk.challenge);
-  if (pk.user && typeof pk.user.id === 'string') pk.user.id = b64urlToBuf(pk.user.id);
+  if (pk.user) pk.user.id = normalizeUserId(pk.user.id);
   if (pk.excludeCredentials) pk.excludeCredentials = pk.excludeCredentials.map(d => ({...d, id: (typeof d.id==='string') ? b64urlToBuf(d.id) : d.id}));
   if (pk.allowCredentials) pk.allowCredentials = pk.allowCredentials.map(d => ({...d, id: (typeof d.id==='string') ? b64urlToBuf(d.id) : d.id}));
   let cred;

@@ -10,24 +10,35 @@ struct VaultLoginConfig {
     var userHandle: String
     var userName: String?
     var role: String?
+    /// Explicit token for `register/*` (else env `VAULT_TOKEN` or `~/.vault-token`).
+    var vaultToken: String?
 }
 
-enum VaultLoginPasskeyError: Error, CustomStringConvertible {
+enum VaultLoginPasskeyError: Error, CustomStringConvertible, LocalizedError {
     case invalidArgs(String)
     case invalidVaultAddr
     case missing(String)
+    case lookupSelfPermissionDenied
 
     var description: String {
         switch self {
         case .invalidArgs(let s): return "invalid args: \(s)"
         case .invalidVaultAddr: return "invalid vaultAddr"
         case .missing(let s): return "missing: \(s)"
+        case .lookupSelfPermissionDenied:
+            return """
+            Vault denied auth/token/lookup-self for this token (HTTP 401/403). Passkey-issued tokens usually cannot call that path. \
+            Use --user-handle with the entity name or id from registration, or a token whose policy allows path \"auth/token/lookup-self\". \
+            CLI login auto-resolve uses only --vault-token / VAULT_TOKEN (not ~/.vault-token). In the UI, only the Vault token field is used — not VAULT_TOKEN.
+            """
         }
     }
+
+    var errorDescription: String? { description }
 }
 
 final class VaultClient {
-    func call(path: String, payload: [String: Any], vaultAddr: String, mountPath: String) async throws -> [String: Any] {
+    func call(path: String, payload: [String: Any], vaultAddr: String, mountPath: String, vaultToken: String? = nil) async throws -> [String: Any] {
         let addr = vaultAddr.trimmingCharacters(in: .whitespacesAndNewlines)
         var mount = mountPath.trimmingCharacters(in: .whitespacesAndNewlines)
         mount = mount.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -40,6 +51,9 @@ final class VaultClient {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let t = vaultToken?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+            req.setValue(t, forHTTPHeaderField: "X-Vault-Token")
+        }
         req.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         let (data, httpResp) = try await URLSession.shared.data(for: req)
@@ -73,18 +87,270 @@ final class VaultClient {
     }
 }
 
+/// Passkey `user_handle` the plugin expects (entity name, or entity id if name is empty).
+struct ResolvedPasskeyPrincipal: Sendable {
+    let userHandle: String
+    let entityId: String
+    let source: String
+}
+
+extension VaultClient {
+    func resolvePasskeyPrincipal(vaultAddr: String, vaultToken: String) async throws -> ResolvedPasskeyPrincipal {
+        let trimmed = vaultToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw VaultLoginPasskeyError.missing("vault token for principal resolution")
+        }
+
+        let lookup: [String: Any]
+        do {
+            lookup = try await vaultJSONRequest(
+                method: "POST",
+                v1Path: "auth/token/lookup-self",
+                jsonBody: [:],
+                vaultAddr: vaultAddr,
+                vaultToken: trimmed
+            )
+        } catch {
+            let ne = error as NSError
+            let httpStatus =
+                (ne.userInfo["httpStatus"] as? NSNumber)?.intValue
+                ?? (ne.userInfo["httpStatus"] as? Int)
+                ?? (ne.domain == "vault-login-passkey.http" ? ne.code : 0)
+            if httpStatus == 403 || httpStatus == 401 {
+                throw VaultLoginPasskeyError.lookupSelfPermissionDenied
+            }
+            throw error
+        }
+        let data = vaultUnwrapData(lookup)
+        guard let entityId = data["entity_id"] as? String, !entityId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw VaultLoginPasskeyError.missing("token has no entity_id (enable Identity on the auth method / use a token bound to an entity)")
+        }
+
+        if let ent = try? await vaultJSONRequest(
+            method: "GET",
+            v1Path: "identity/entity/id/\(entityId)",
+            jsonBody: nil,
+            vaultAddr: vaultAddr,
+            vaultToken: trimmed
+        ) {
+            let entData = vaultUnwrapData(ent)
+            if let name = entData["name"] as? String {
+                let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !n.isEmpty {
+                    return ResolvedPasskeyPrincipal(userHandle: n, entityId: entityId, source: "entity_name")
+                }
+            }
+        }
+
+        return ResolvedPasskeyPrincipal(userHandle: entityId, entityId: entityId, source: "entity_id")
+    }
+
+    private func vaultUnwrapData(_ root: [String: Any]) -> [String: Any] {
+        if let d = root["data"] as? [String: Any] { return d }
+        return root
+    }
+
+    private func vaultJSONRequest(
+        method: String,
+        v1Path: String,
+        jsonBody: [String: Any]?,
+        vaultAddr: String,
+        vaultToken: String
+    ) async throws -> [String: Any] {
+        var path = v1Path.trimmingCharacters(in: .whitespacesAndNewlines)
+        path = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        let base = vaultAddr.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard URL(string: base)?.scheme != nil else {
+            throw VaultLoginPasskeyError.invalidVaultAddr
+        }
+
+        let urlString = "\(base)/v1/\(path)"
+        guard let url = URL(string: urlString) else {
+            throw VaultLoginPasskeyError.invalidVaultAddr
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        let tok = vaultToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        req.setValue(tok, forHTTPHeaderField: "X-Vault-Token")
+        if let jsonBody {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: jsonBody, options: [])
+        }
+
+        let (data, httpResp) = try await URLSession.shared.data(for: req)
+        guard let r = httpResp as? HTTPURLResponse else {
+            throw NSError(domain: "vault-login-passkey", code: 3, userInfo: [NSLocalizedDescriptionKey: "no HTTP response"])
+        }
+
+        let obj = try JSONSerialization.jsonObject(with: data, options: [])
+        guard let dict = obj as? [String: Any] else {
+            throw NSError(domain: "vault-login-passkey", code: 4, userInfo: [NSLocalizedDescriptionKey: "non-object JSON from Vault"])
+        }
+
+        if r.statusCode >= 200 && r.statusCode < 300 {
+            return dict
+        }
+
+        let bodyString: String
+        if let d = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]),
+           let s = String(data: d, encoding: .utf8) {
+            bodyString = s
+        } else {
+            bodyString = String(describing: obj)
+        }
+        throw NSError(
+            domain: "vault-login-passkey.http",
+            code: r.statusCode,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Vault API returned HTTP \(r.statusCode) for \(url.path)",
+                "httpStatus": r.statusCode,
+                "url": url.absoluteString,
+                "body": bodyString
+            ]
+        )
+    }
+}
+
 enum VaultTokenStore {
     static func writeVaultToken(_ token: String) throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let tokenPath = home.appendingPathComponent(".vault-token")
         try token.write(to: tokenPath, atomically: true, encoding: .utf8)
     }
+
+    static func readVaultToken() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let tokenPath = home.appendingPathComponent(".vault-token")
+        guard let data = try? Data(contentsOf: tokenPath),
+              let s = String(data: data, encoding: .utf8) else { return nil }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
+    /// Order: explicit non-empty string, then `VAULT_TOKEN`, then `~/.vault-token`.
+    static func resolveVaultToken(explicit: String?) -> String? {
+        if let e = explicit?.trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty { return e }
+        if let env = ProcessInfo.processInfo.environment["VAULT_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !env.isEmpty {
+            return env
+        }
+        return readVaultToken()
+    }
+
+    /// For passkey *login* principal resolution only: explicit token or `VAULT_TOKEN`, not `~/.vault-token`.
+    static func resolveVaultTokenForLoginPrincipal(explicit: String?) -> String? {
+        if let e = explicit?.trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty { return e }
+        if let env = ProcessInfo.processInfo.environment["VAULT_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !env.isEmpty {
+            return env
+        }
+        return nil
+    }
 }
 
-final class VaultLoginPasskeyApp: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
+/// `register/finish` Vault JSON may nest `user_handle` under `data` (or deeper); walk the tree.
+private func registerFinishUserHandle(_ finish: [String: Any]) -> String? {
+    func asTrimmedString(_ v: Any?) -> String? {
+        if let s = v as? String {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+        if let s = v as? NSString {
+            let t = String(s).trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+        return nil
+    }
+    func walk(_ obj: Any, depth: Int) -> String? {
+        guard depth < 12 else { return nil }
+        if let dict = obj as? [String: Any] {
+            if let uh = asTrimmedString(dict["user_handle"]) { return uh }
+            for (_, v) in dict {
+                if let found = walk(v, depth: depth + 1) { return found }
+            }
+        } else if let arr = obj as? [Any] {
+            for v in arr {
+                if let found = walk(v, depth: depth + 1) { return found }
+            }
+        }
+        return nil
+    }
+    return walk(finish, depth: 0)
+}
+
+// MARK: - Persisted HTML form (WK UI has no @AppStorage)
+
+private struct PasskeyUIFormState: Codable {
+    var vaultAddr: String
+    var mountPath: String
+    var userName: String
+    var userHandle: String
+    var role: String
+}
+
+private enum PasskeyUIFormStore {
+    static let defaultsKey = "vaultLoginPasskey.uiForm.v1"
+
+    static func save(vaultAddr: String, mountPath: String, userName: String, userHandle: String, role: String) {
+        let roleTrim = role.trimmingCharacters(in: .whitespacesAndNewlines)
+        let state = PasskeyUIFormState(
+            vaultAddr: vaultAddr.trimmingCharacters(in: .whitespacesAndNewlines),
+            mountPath: mountPath.trimmingCharacters(in: .whitespacesAndNewlines),
+            userName: userName.trimmingCharacters(in: .whitespacesAndNewlines),
+            userHandle: userHandle.trimmingCharacters(in: .whitespacesAndNewlines),
+            role: roleTrim.isEmpty ? "default" : roleTrim
+        )
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        UserDefaults.standard.set(data, forKey: defaultsKey)
+    }
+
+    static func load() -> PasskeyUIFormState? {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else { return nil }
+        return try? JSONDecoder().decode(PasskeyUIFormState.self, from: data)
+    }
+
+    /// JSON object literal for embedding in `evaluateJavaScript` (values only; keys fixed in JS).
+    static func jsonObjectLiteralForScript() -> String? {
+        guard let s = load() else { return nil }
+        let dict: [String: String] = [
+            "vaultAddr": s.vaultAddr,
+            "mountPath": s.mountPath,
+            "userName": s.userName,
+            "userHandle": s.userHandle,
+            "role": s.role
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return json
+    }
+}
+
+/// WKWebView text fields need a responder chain + Edit menu for ⌘C / ⌘V; this forwards command-key editing shortcuts.
+private final class EditingWKWebView: WKWebView {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mod = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard mod.contains(.command), let ch = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        if ch == "c" || ch == "v" || ch == "x" || ch == "a" {
+            return super.performKeyEquivalent(with: event)
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+final class VaultLoginPasskeyApp: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     private var window: NSWindow!
-    private var webView: WKWebView!
+    private var webView: EditingWKWebView!
+    private var localKeyEventMonitor: Any?
     private let vault = VaultClient()
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        Self.installMinimalMainMenu(appName: "Vault Passkey Login")
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let contentController = WKUserContentController()
@@ -93,7 +359,8 @@ final class VaultLoginPasskeyApp: NSObject, NSApplicationDelegate, WKScriptMessa
         let config = WKWebViewConfiguration()
         config.userContentController = contentController
 
-        webView = WKWebView(frame: .zero, configuration: config)
+        webView = EditingWKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = self
         // Use localhost origin so WebAuthn can work in a secure context without HTTPS during dev.
         // WebAuthn treats http://localhost as a secure context in most user agents.
         webView.loadHTMLString(Self.html, baseURL: URL(string: "http://localhost")!)
@@ -109,6 +376,91 @@ final class VaultLoginPasskeyApp: NSObject, NSApplicationDelegate, WKScriptMessa
         window.contentView = webView
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        installLocalEditCommandShortcuts()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let m = localKeyEventMonitor {
+            NSEvent.removeMonitor(m)
+            localKeyEventMonitor = nil
+        }
+    }
+
+    /// WKWebView often does not receive ⌘C / ⌘V from the menu alone; route editing selectors down the responder chain.
+    private func installLocalEditCommandShortcuts() {
+        localKeyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            guard self.window.isKeyWindow else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard flags.contains(.command), !flags.contains(.control) else { return event }
+            guard let ch = event.charactersIgnoringModifiers?.lowercased(), ch.count == 1 else { return event }
+            let sel: Selector? = switch ch.first! {
+            case "c": NSSelectorFromString("copy:")
+            case "v": NSSelectorFromString("paste:")
+            case "x": NSSelectorFromString("cut:")
+            case "a": NSSelectorFromString("selectAll:")
+            default: nil
+            }
+            guard let sel else { return event }
+            if NSApp.sendAction(sel, to: nil, from: self.webView) {
+                return nil
+            }
+            return event
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        window.makeFirstResponder(webView)
+        applyPersistedFormToWebView(webView)
+    }
+
+    private func applyPersistedFormToWebView(_ webView: WKWebView) {
+        guard let json = PasskeyUIFormStore.jsonObjectLiteralForScript() else { return }
+        let js = """
+        (function(){
+          try {
+            var o = \(json);
+            function set(id, v){ var e = document.getElementById(id); if (e) e.value = v != null ? String(v) : ''; }
+            set('vaultAddr', o.vaultAddr);
+            set('mountPath', o.mountPath);
+            set('userName', o.userName);
+            set('userHandle', o.userHandle);
+            set('role', o.role);
+          } catch (e) {}
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    /// SwiftPM apps often have no menu bar; without Edit › Paste, ⌘V does not reach WKWebView.
+    private static func installMinimalMainMenu(appName: String) {
+        let mainMenu = NSMenu()
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(.separator())
+        let cut = NSMenuItem(title: "Cut", action: NSSelectorFromString("cut:"), keyEquivalent: "x")
+        let copy = NSMenuItem(title: "Copy", action: NSSelectorFromString("copy:"), keyEquivalent: "c")
+        let paste = NSMenuItem(title: "Paste", action: NSSelectorFromString("paste:"), keyEquivalent: "v")
+        let selAll = NSMenuItem(title: "Select All", action: NSSelectorFromString("selectAll:"), keyEquivalent: "a")
+        for i in [cut, copy, paste, selAll] {
+            i.target = nil
+            editMenu.addItem(i)
+        }
+
+        NSApp.mainMenu = mainMenu
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -128,7 +480,8 @@ final class VaultLoginPasskeyApp: NSObject, NSApplicationDelegate, WKScriptMessa
                 let result = try await handle(action: action, body: body)
                 await sendResult(requestId: requestId, ok: true, result: result)
             } catch {
-                await sendResult(requestId: requestId, ok: false, result: ["error": String(describing: error)])
+                let msg = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                await sendResult(requestId: requestId, ok: false, result: ["error": msg])
             }
         }
     }
@@ -147,13 +500,20 @@ final class VaultLoginPasskeyApp: NSObject, NSApplicationDelegate, WKScriptMessa
     private func handleRegister(body: [String: Any]) async throws -> [String: Any] {
         let vaultAddr = body["vaultAddr"] as? String ?? ""
         let mountPath = body["mountPath"] as? String ?? "auth/passkey"
-        let userHandle = body["userHandle"] as? String ?? ""
-        let userName = (body["userName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? userHandle
+        let userNameOpt = (body["userName"] as? String).flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        let roleField = (body["role"] as? String ?? "default").trimmingCharacters(in: .whitespacesAndNewlines)
+        let userHandleField = (body["userHandle"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let vaultToken = VaultTokenStore.resolveVaultToken(explicit: body["vaultToken"] as? String)
+        guard let vaultToken, !vaultToken.isEmpty else {
+            throw NSError(domain: "vault-login-passkey", code: 11, userInfo: [NSLocalizedDescriptionKey: "Vault token required for registration: paste token, set VAULT_TOKEN, or use ~/.vault-token from a prior login"])
+        }
 
-        let begin = try await vault.call(path: "register/begin", payload: [
-            "user_handle": userHandle,
-            "user_name": userName
-        ], vaultAddr: vaultAddr, mountPath: mountPath)
+        var beginPayload: [String: Any] = [:]
+        if let userNameOpt {
+            beginPayload["user_name"] = userNameOpt
+        }
+
+        let begin = try await vault.call(path: "register/begin", payload: beginPayload, vaultAddr: vaultAddr, mountPath: mountPath, vaultToken: vaultToken)
 
         let sessionId = (begin["session_id"] as? String)
             ?? ((begin["data"] as? [String: Any])?["session_id"] as? String)
@@ -170,16 +530,47 @@ final class VaultLoginPasskeyApp: NSObject, NSApplicationDelegate, WKScriptMessa
         let finish = try await vault.call(path: "register/finish", payload: [
             "session_id": sessionId,
             "credential": credentialB64
-        ], vaultAddr: vaultAddr, mountPath: mountPath)
+        ], vaultAddr: vaultAddr, mountPath: mountPath, vaultToken: vaultToken)
 
-        return ["begin": begin, "finish": finish]
+        var result: [String: Any] = ["begin": begin, "finish": finish]
+        let resolvedHandle = registerFinishUserHandle(finish) ?? (userHandleField.isEmpty ? nil : userHandleField)
+        if let uh = resolvedHandle {
+            result["savedUserHandle"] = uh
+        }
+        let roleSaved = roleField.isEmpty ? "default" : roleField
+        let nameSaved = userNameOpt ?? ""
+        let handleStored = resolvedHandle ?? userHandleField
+        PasskeyUIFormStore.save(
+            vaultAddr: vaultAddr,
+            mountPath: mountPath,
+            userName: nameSaved,
+            userHandle: handleStored,
+            role: roleSaved
+        )
+        result["savedForm"] = [
+            "vaultAddr": vaultAddr,
+            "mountPath": mountPath,
+            "userName": nameSaved,
+            "userHandle": handleStored,
+            "role": roleSaved
+        ]
+        return result
     }
 
     private func handleLogin(body: [String: Any]) async throws -> [String: Any] {
         let vaultAddr = body["vaultAddr"] as? String ?? ""
         let mountPath = body["mountPath"] as? String ?? "auth/passkey"
-        let userHandle = body["userHandle"] as? String ?? ""
+        var userHandle = (body["userHandle"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let role = body["role"] as? String ?? "default"
+        let loginToken = (body["vaultToken"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if userHandle.isEmpty, !loginToken.isEmpty {
+            let r = try await vault.resolvePasskeyPrincipal(vaultAddr: vaultAddr, vaultToken: loginToken)
+            userHandle = r.userHandle
+        }
+        guard !userHandle.isEmpty else {
+            throw NSError(domain: "vault-login-passkey", code: 21, userInfo: [NSLocalizedDescriptionKey: "login needs user_handle or a Vault token in the field (VAULT_TOKEN is not used for UI login auto-resolve; ~/.vault-token is never used for that)"])
+        }
 
         let begin = try await vault.call(path: "login/begin", payload: [
             "role": role,
@@ -245,13 +636,14 @@ struct CLI {
         """
 Usage:
   vault-login-passkey ui
-  vault-login-passkey cli register --vault-addr <addr> --mount-path <path> --user-handle <sub> [--user-name <name>]
-  vault-login-passkey cli login    --vault-addr <addr> --mount-path <path> --user-handle <sub> --role <role>
+  vault-login-passkey cli register --vault-addr <addr> --mount-path <path> [--user-name <name>] [--vault-token <tok>]
+  vault-login-passkey cli login    --vault-addr <addr> --mount-path <path> [--user-handle <sub>] [--vault-token <tok>] --role <role>
 
 Examples:
   vault-login-passkey ui
-  vault-login-passkey cli register --vault-addr http://localhost:8200 --mount-path auth/passkey --user-handle gs.lee
-  vault-login-passkey cli login --vault-addr http://localhost:8200 --mount-path auth/passkey --user-handle gs.lee --role default
+  vault-login-passkey cli register --vault-addr http://localhost:8200 --mount-path auth/passkey
+  vault-login-passkey cli login --vault-addr http://localhost:8200 --mount-path auth/passkey --role default
+  vault-login-passkey cli login --vault-addr http://localhost:8200 --mount-path auth/passkey --user-handle my-entity-name --role default
 """
     }
 
@@ -285,16 +677,20 @@ Examples:
         let userHandle = value("--user-handle") ?? value("--user_handle") ?? ""
         let userName = value("--user-name") ?? value("--user_name")
         let role = value("--role")
+        let vaultToken = value("--vault-token") ?? value("--vault_token")
 
         if vaultAddr.isEmpty { throw VaultLoginPasskeyError.missing("--vault-addr") }
-        if userHandle.isEmpty { throw VaultLoginPasskeyError.missing("--user-handle") }
 
-        var cfg = VaultLoginConfig(vaultAddr: vaultAddr, mountPath: mountPath, userHandle: userHandle, userName: userName, role: role)
+        var cfg = VaultLoginConfig(vaultAddr: vaultAddr, mountPath: mountPath, userHandle: userHandle, userName: userName, role: role, vaultToken: vaultToken)
 
         switch sub {
         case "register":
             return (.cliRegister, cfg)
         case "login":
+            let hasLoginResolveToken = !(VaultTokenStore.resolveVaultTokenForLoginPrincipal(explicit: vaultToken) ?? "").isEmpty
+            if userHandle.isEmpty && !hasLoginResolveToken {
+                throw VaultLoginPasskeyError.missing("--user-handle or --vault-token / VAULT_TOKEN for lookup-self (~/.vault-token is not used for login auto-resolve)")
+            }
             if (cfg.role ?? "").isEmpty { cfg.role = "default" }
             return (.cliLogin, cfg)
         default:
@@ -304,11 +700,15 @@ Examples:
 
     static func runRegister(_ cfg: VaultLoginConfig) async throws -> [String: Any] {
         let vault = VaultClient()
+        guard let token = VaultTokenStore.resolveVaultToken(explicit: cfg.vaultToken), !token.isEmpty else {
+            throw VaultLoginPasskeyError.missing("Vault token for registration (VAULT_TOKEN, ~/.vault-token, or --vault-token)")
+        }
         log("[passkey] register: calling Vault register/begin ...")
-        let begin = try await vault.call(path: "register/begin", payload: [
-            "user_handle": cfg.userHandle,
-            "user_name": (cfg.userName?.isEmpty == false) ? cfg.userName! : cfg.userHandle
-        ], vaultAddr: cfg.vaultAddr, mountPath: cfg.mountPath)
+        var beginPayload: [String: Any] = [:]
+        if let un = cfg.userName, !un.isEmpty {
+            beginPayload["user_name"] = un
+        }
+        let begin = try await vault.call(path: "register/begin", payload: beginPayload, vaultAddr: cfg.vaultAddr, mountPath: cfg.mountPath, vaultToken: token)
 
         let sessionId = (begin["session_id"] as? String)
             ?? ((begin["data"] as? [String: Any])?["session_id"] as? String)
@@ -325,17 +725,43 @@ Examples:
         let finish = try await vault.call(path: "register/finish", payload: [
             "session_id": sessionId,
             "credential": credentialB64
-        ], vaultAddr: cfg.vaultAddr, mountPath: cfg.mountPath)
+        ], vaultAddr: cfg.vaultAddr, mountPath: cfg.mountPath, vaultToken: token)
 
-        return ["begin": begin, "finish": finish]
+        var result: [String: Any] = ["begin": begin, "finish": finish]
+        let uhFromFinish = registerFinishUserHandle(finish)
+        let userHandleField = cfg.userHandle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedHandle = uhFromFinish ?? (userHandleField.isEmpty ? nil : userHandleField)
+        if let uh = resolvedHandle {
+            result["savedUserHandle"] = uh
+        }
+        let roleSaved = (cfg.role ?? "default").trimmingCharacters(in: .whitespacesAndNewlines)
+        let roleFinal = roleSaved.isEmpty ? "default" : roleSaved
+        let nameSaved = cfg.userName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        PasskeyUIFormStore.save(
+            vaultAddr: cfg.vaultAddr,
+            mountPath: cfg.mountPath,
+            userName: nameSaved,
+            userHandle: resolvedHandle ?? userHandleField,
+            role: roleFinal
+        )
+        return result
     }
 
     static func runLogin(_ cfg: VaultLoginConfig) async throws -> [String: Any] {
         let vault = VaultClient()
+        var userHandle = cfg.userHandle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if userHandle.isEmpty, let t = VaultTokenStore.resolveVaultTokenForLoginPrincipal(explicit: cfg.vaultToken), !t.isEmpty {
+            let r = try await vault.resolvePasskeyPrincipal(vaultAddr: cfg.vaultAddr, vaultToken: t)
+            userHandle = r.userHandle
+            log("[passkey] login: resolved user_handle from token (\(r.source)): \(userHandle)")
+        }
+        guard !userHandle.isEmpty else {
+            throw VaultLoginPasskeyError.missing("--user-handle or --vault-token / VAULT_TOKEN to resolve principal (~/.vault-token is not used for login auto-resolve)")
+        }
         log("[passkey] login: calling Vault login/begin ...")
         let begin = try await vault.call(path: "login/begin", payload: [
             "role": cfg.role ?? "default",
-            "user_handle": cfg.userHandle
+            "user_handle": userHandle
         ], vaultAddr: cfg.vaultAddr, mountPath: cfg.mountPath)
 
         let sessionId = (begin["session_id"] as? String)
@@ -561,12 +987,37 @@ final class SafariWebAuthnServer {
 <script>
 const options = \(optionsJSON);
 function b64urlToBuf(b64url) {
-  const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
-  const b64 = (b64url + pad).replace(/-/g,'+').replace(/_/g,'/');
-  const str = atob(b64);
-  const bytes = new Uint8Array(str.length);
-  for (let i=0;i<str.length;i++) bytes[i] = str.charCodeAt(i);
-  return bytes.buffer;
+  if (!b64url || typeof b64url !== 'string') return null;
+  try {
+    const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
+    const b64 = (b64url + pad).replace(/-/g,'+').replace(/_/g,'/');
+    const str = atob(b64);
+    const bytes = new Uint8Array(str.length);
+    for (let i=0;i<str.length;i++) bytes[i] = str.charCodeAt(i);
+    return bytes.buffer;
+  } catch (e) { return null; }
+}
+function normalizeUserId(id) {
+  if (id === undefined || id === null) throw new TypeError('user.id is missing');
+  let buf = null;
+  if (typeof id === 'string') {
+    buf = b64urlToBuf(id);
+    if (buf && (buf.byteLength < 1 || buf.byteLength > 64)) buf = null;
+    if (!buf) {
+      const te = new TextEncoder();
+      const u = te.encode(id);
+      if (u.length >= 1 && u.length <= 64) buf = u.buffer;
+    }
+  } else if (Array.isArray(id)) {
+    const u = new Uint8Array(id);
+    if (u.length >= 1 && u.length <= 64) buf = u.buffer;
+  } else if (id instanceof ArrayBuffer) {
+    if (id.byteLength >= 1 && id.byteLength <= 64) buf = id;
+  } else if (id instanceof Uint8Array) {
+    if (id.length >= 1 && id.length <= 64) buf = id.buffer;
+  }
+  if (!buf) throw new TypeError('user.id must be 1-64 bytes after normalization');
+  return buf;
 }
 function bufToB64url(buf) {
   const bytes = new Uint8Array(buf);
@@ -611,7 +1062,7 @@ async function main() {
   document.getElementById('out').textContent = 'Starting WebAuthn...';
   const pk = options.publicKey || options;
   pk.challenge = b64urlToBuf(pk.challenge);
-  if (pk.user && typeof pk.user.id === 'string') pk.user.id = b64urlToBuf(pk.user.id);
+  if (pk.user) pk.user.id = normalizeUserId(pk.user.id);
   if (pk.excludeCredentials) pk.excludeCredentials = pk.excludeCredentials.map(d => ({...d, id: (typeof d.id==='string') ? b64urlToBuf(d.id) : d.id}));
   if (pk.allowCredentials) pk.allowCredentials = pk.allowCredentials.map(d => ({...d, id: (typeof d.id==='string') ? b64urlToBuf(d.id) : d.id}));
   let cred;
@@ -853,16 +1304,20 @@ extension VaultLoginPasskeyApp {
 
   <div class="row">
     <div class="col">
-      <label>User handle (sub)</label>
-      <input id="userHandle" placeholder="e.g. employeeId or username" />
+      <label>Vault token</label>
+      <input id="vaultToken" type="password" placeholder="register: required. login: optional (field only — lookup-self; clear if passkey token)" autocomplete="off" />
     </div>
     <div class="col">
-      <label>User name (optional, for display)</label>
-      <input id="userName" placeholder="optional" />
+      <label>User name (optional, WebAuthn display; register)</label>
+      <input id="userName" placeholder="defaults to entity name / id" />
     </div>
   </div>
 
   <div class="row">
+    <div class="col">
+      <label>user_handle (login; filled automatically after Register)</label>
+      <input id="userHandle" placeholder="entity name or id — saved when registration succeeds" />
+    </div>
     <div class="col">
       <label>Role (for login)</label>
       <input id="role" placeholder="default" value="default" />
@@ -932,12 +1387,36 @@ extension VaultLoginPasskeyApp {
 
     function base64urlToBuf(b64url) {
       if (!b64url || typeof b64url !== 'string') return null;
-      const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
-      const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
-      const str = atob(b64);
-      const bytes = new Uint8Array(str.length);
-      for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i);
-      return bytes.buffer;
+      try {
+        const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
+        const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
+        const str = atob(b64);
+        const bytes = new Uint8Array(str.length);
+        for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i);
+        return bytes.buffer;
+      } catch (e) { return null; }
+    }
+    function normalizeUserId(id) {
+      if (id === undefined || id === null) throw new TypeError('user.id is missing');
+      let buf = null;
+      if (typeof id === 'string') {
+        buf = base64urlToBuf(id);
+        if (buf && (buf.byteLength < 1 || buf.byteLength > 64)) buf = null;
+        if (!buf) {
+          const te = new TextEncoder();
+          const u = te.encode(id);
+          if (u.length >= 1 && u.length <= 64) buf = u.buffer;
+        }
+      } else if (Array.isArray(id)) {
+        const u = new Uint8Array(id);
+        if (u.length >= 1 && u.length <= 64) buf = u.buffer;
+      } else if (id instanceof ArrayBuffer) {
+        if (id.byteLength >= 1 && id.byteLength <= 64) buf = id;
+      } else if (id instanceof Uint8Array) {
+        if (id.length >= 1 && id.length <= 64) buf = id.buffer;
+      }
+      if (!buf) throw new TypeError('user.id must be 1-64 bytes after normalization');
+      return buf;
     }
 
     function preflightWebAuthn() {
@@ -955,8 +1434,8 @@ extension VaultLoginPasskeyApp {
       const pk = structuredClone(publicKey);
       // WebAuthn expects ArrayBuffer for challenge and user.id and credential IDs.
       pk.challenge = base64urlToBuf(pk.challenge);
-      if (pk.user && typeof pk.user.id === 'string') {
-        pk.user.id = base64urlToBuf(pk.user.id);
+      if (pk.user) {
+        pk.user.id = normalizeUserId(pk.user.id);
       }
       if (Array.isArray(pk.excludeCredentials)) {
         pk.excludeCredentials = pk.excludeCredentials.map(d => ({
@@ -991,14 +1470,31 @@ extension VaultLoginPasskeyApp {
       return cred;
     }
 
+    function applySavedForm(f) {
+      if (!f || typeof f !== 'object') return;
+      const set = (id, k) => {
+        const e = document.getElementById(id);
+        if (e && f[k] != null && f[k] !== undefined) e.value = String(f[k]);
+      };
+      set('vaultAddr', 'vaultAddr');
+      set('mountPath', 'mountPath');
+      set('userName', 'userName');
+      set('userHandle', 'userHandle');
+      set('role', 'role');
+    }
+
     async function register() {
       try {
         const vaultAddr = document.getElementById('vaultAddr').value;
         const mountPath = document.getElementById('mountPath').value;
-        const userHandle = document.getElementById('userHandle').value;
         const userName = document.getElementById('userName').value;
+        const vaultToken = document.getElementById('vaultToken').value;
+        const userHandle = document.getElementById('userHandle').value;
+        const role = document.getElementById('role').value;
 
-        const result = await callNative('register', { vaultAddr, mountPath, userHandle, userName });
+        const result = await callNative('register', { vaultAddr, mountPath, userName, vaultToken, userHandle, role });
+        if (result && result.savedForm) applySavedForm(result.savedForm);
+        else if (result && result.savedUserHandle) document.getElementById('userHandle').value = result.savedUserHandle;
         out(result);
       } catch (e) {
         out({ error: serializeError(e) });
@@ -1010,9 +1506,10 @@ extension VaultLoginPasskeyApp {
         const vaultAddr = document.getElementById('vaultAddr').value;
         const mountPath = document.getElementById('mountPath').value;
         const userHandle = document.getElementById('userHandle').value;
+        const vaultToken = document.getElementById('vaultToken').value;
         const role = document.getElementById('role').value;
 
-        const result = await callNative('login', { vaultAddr, mountPath, role, userHandle });
+        const result = await callNative('login', { vaultAddr, mountPath, role, userHandle, vaultToken });
         out(result);
       } catch (e) {
         out({ error: serializeError(e) });

@@ -36,13 +36,13 @@ sequenceDiagram
   participant Vault as Vault(AuthPlugin)
 
   User->>Helper: register/login 실행
-  Helper->>Vault: POST register|login/begin
+  Helper->>Vault: POST register|login/begin (register 시 X-Vault-Token)
   Vault-->>Helper: session_id + options(WebAuthn)
   Helper->>Safari: http://localhost:8765 열기
   User->>Safari: Continue 클릭(사용자 제스처)
   Safari->>Safari: navigator.credentials.create|get()
   Safari->>Helper: POST /result(PublicKeyCredential JSON)
-  Helper->>Vault: POST register|login/finish(credential)
+  Helper->>Vault: POST register|login/finish(credential) (register 시 X-Vault-Token)
   Vault-->>Helper: (register) 저장 완료 / (login) Vault token 발급
   Helper-->>User: ~/.vault-token 저장(선택) 및 결과 표시
 ```
@@ -52,14 +52,19 @@ sequenceDiagram
 
 모든 엔드포인트는 마운트 경로 하위에 있습니다. (예: `auth/passkey/`)
 
-- `POST register/begin` (`user_handle`, `user_name` 선택)
+- `POST register/begin` (**`X-Vault-Token` 필수**, 토큰에 Identity **EntityID**가 있어야 함)
+  - 선택 `user_name`: WebAuthn 표시 이름(미입력 시 파생된 principal 문자열)
+  - 선택 `user_handle`: 넣은 경우 **파생된 principal과 동일**해야 하며, 그렇지 않으면 거부
+  - passkey principal: entity **name**이 비어 있지 않으면 그 이름, 비어 있으면 **entity id** 문자열 (클라이언트가 임의 subject 지정 불가)
+  - WebAuthn `user.id`는 항상 **SHA-256(UTF-8 principal)** 32바이트이며, Vault `user_handle`은 문자열 principal 그대로 사용
   - 응답: `session_id`, `options` (WebAuthn `PublicKeyCredentialCreationOptions`)
-- `POST register/finish` (`session_id`, `credential`)
+- `POST register/finish` (`session_id`, `credential`, **`X-Vault-Token`** — begin과 동일한 신원)
   - `credential`: 브라우저 `PublicKeyCredential` 응답(JSON 바이트)을 base64url로 인코딩한 값
+  - 성공 시: credential을 저장하고, 가능하면 등록 토큰의 **canonical entity**에 이 auth mount용 **identity entity-alias**를 (멱등으로) 붙임. alias **이름**은 entity id·mount accessor로부터 **결정적으로** 도출된 `passkey_` + 8자리 16진이며, WebAuthn·저장용 **principal**인 `user_handle`(entity 이름 또는 id)과는 별개입니다. 이전 버전처럼 잘못 붙은 alias(예: entity 이름과 동일)가 있으면 삭제 후 위 이름으로 다시 붙입니다. `ForwardGenericRequest`가 없으면 등록은 성공하고 **경고**만 붙을 수 있으나, 로그인 응답의 `Auth.Alias.Name`은 동일 규칙의 `passkey_*`를 써서 동일 entity에 매핑됩니다.
 - `POST login/begin` (`role`, `user_handle`)
   - 응답: `session_id`, `options` (WebAuthn `PublicKeyCredentialRequestOptions`)
 - `POST login/finish` (`session_id`, `credential`)
-  - 성공 시 Vault 토큰 발급 (`identity alias Name = user_handle`)
+  - 성공 시 Vault 토큰 발급; identity alias **Name**은 entity id·mount accessor로 도출된 `passkey_xxxxxxxx`(등록 시 만든 것과 동일)이며, 메타데이터에 `user_handle`(principal)이 실림
 
 ## 설정
 
@@ -69,7 +74,7 @@ sequenceDiagram
 |---|---:|---|---|
 | `rp_id` | O | WebAuthn RP ID | `localhost` |
 | `allowed_origins` | O | WebAuthn 검증에 허용할 origin 목록 | `http://localhost:8765` |
-| `allowed_user_handle_regex` | X | 전역 `user_handle` 검증 정규식(등록/로그인 모두 적용) | `^[a-z0-9_.-]+$` |
+| `allowed_user_handle_regex` | X | principal이 **entity name**일 때만 검증(등록/로그인). principal이 **entity id**인 경우(이름 없음)에는 적용하지 않음 | `^[a-z0-9_.-]+$` |
 | `challenge_ttl` | X | 챌린지 유효시간(기본 `2m`) | `2m` |
 
 ### role (`auth/passkey/role/<name>`)
@@ -143,7 +148,17 @@ vault write auth/passkey/role/default \
   max_ttl="24h"
 ```
 
-## 빠른 시작(끝까지 한 번에)
+### 부트스트랩: entity + 1차 로그인 후 passkey 등록
+
+Passkey **등록**은 Vault 토큰에 Identity **EntityID**가 있을 때만 허용됩니다. 일반적인 흐름은 다음과 같습니다.
+
+1. Identity **entity**를 만들거나 기존 entity를 사용합니다 (예: 이름 `alice`).
+2. **userpass** 등으로 로그인해, 해당 entity에 매핑된 토큰을 발급받습니다.
+3. 그 토큰을 **`X-Vault-Token`**으로 두고 `register/begin`·`register/finish`를 호출합니다. 플러그인은 entity **이름**(또는 id)을 WebAuthn principal·`user_handle`로 쓰고, Vault가 지원하면 해당 entity에 **passkey mount entity-alias**를 붙입니다(alias 이름은 entity·mount 기준으로 고정되는 `passkey_` + 8자리 16진).
+
+**로그인**(`login/*`)은 비인증으로 유지되며, 사용자가 등록 시와 같은 **principal**(entity 이름 또는 그렇게 등록한 entity id)을 `user_handle`로 넣습니다. macOS 헬퍼는 Vault 토큰으로 `auth/token/lookup-self`와(정책이 허용하면) `identity/entity/id/...`를 호출해 자동으로 채울 수 있습니다.
+
+## 빠른 시작
 
 1) macOS 로컬 헬퍼 빌드/실행:
 
@@ -157,12 +172,44 @@ swift build -c release
 
 - Vault address: 예시 - `https://vault.example.com`
 - Mount path: `auth/passkey`
-- User handle: 불변 식별자(권장: 사번/계정명. 이메일은 변경될 수 있어 비권장)
-- Role: Policy가 아닌 role 이름 (예시 - `default`)
+- **Vault 토큰**: **등록** 시 필수. **로그인** 시 선택 — 있으면(필드·`VAULT_TOKEN`·`~/.vault-token`) lookup-self 및 가능 시 identity 조회로 `user_handle` 자동 결정
+- **user_handle(로그인)**: 선택; 비어 있고 토큰이 있으면 헬퍼가 principal을 결정
+- **표시 이름**: 등록 시 WebAuthn 표시용(선택)
+- **Role**: 로그인 시 사용(예: `default`)
 
-3) **Register passkey** 후 **Login** 클릭
+**`~/.vault-token`이 아직 없을 때(처음 테스트)**  
+Passkey **등록**에는 Identity **EntityID**가 붙은 Vault 토큰이 필요합니다. 로컬에서 가장 단순한 방법은 **userpass**로 샘플 사용자를 만들고, 그 토큰을 `~/.vault-token`에 넣는 것입니다.
 
-성공하면 헬퍼가 `~/.vault-token`에 토큰을 저장하므로 `vault status`가 바로 동작해야 합니다.
+아래는 **개발/실험용** 예시입니다(`password=demo` 등). 실제 환경에서는 강한 비밀번호와 최소 권한 정책을 쓰세요.
+
+```bash
+export VAULT_ADDR=http://127.0.0.1:8200
+# dev 모드이거나 관리용으로 이미 설정한 토큰
+export VAULT_TOKEN=...   # 예: dev 루트 토큰
+
+# userpass 활성화(이미 켜져 있으면 에러 나도 무시 가능)
+vault auth enable userpass 2>/dev/null || true
+
+# 샘플 사용자: 사용자명 demo, 비밀번호 demo, 정책 default
+vault write auth/userpass/users/demo password=demo policies=default
+
+# 로그인 토큰만 받아서 ~/.vault-token에 저장(끝에 개행이 붙지 않도록 정리)
+TOKEN="$(vault write -field=token auth/userpass/login/demo password=demo | tr -d '\n\r')"
+printf '%s' "$TOKEN" > ~/.vault-token
+chmod 600 ~/.vault-token
+
+# 환경 변수 토큰을 끄고, 파일 토큰만으로 동작하는지 확인
+unset VAULT_TOKEN
+vault status
+vault token lookup
+test -s ~/.vault-token && echo "~/.vault-token OK ($(wc -c < ~/.vault-token) bytes)"
+```
+
+`vault token lookup` 출력에 **`entity_id`**가 비어 있지 않으면, 이 토큰으로 헬퍼에서 **Register passkey**를 진행할 수 있는 경우가 많습니다(최근 Vault에서 userpass 로그인 시 entity가 자동 생성되는 흐름). `entity_id`가 없다면 위 문서의 **「부트스트랩: entity + 1차 로그인 후 passkey 등록」** 절에 따라 entity·alias를 먼저 맞추세요.
+
+3) **Register passkey**(위에서 만든 토큰이 Vault token 필드·`~/.vault-token`·`VAULT_TOKEN` 중 하나로 잡히면 됨) 후 **Login**
+
+성공하면 헬퍼가 `~/.vault-token`을 **패스키 로그인으로 받은 토큰으로 덮어쓰므로**, 이후 `vault status`는 새 토큰 기준으로 동작해야 합니다.
 
 ### macOS `.app` 헬퍼(설정 UI 포함, 선택)
 
@@ -180,28 +227,25 @@ open "./dist/VaultLoginPasskey.app"
 UI 없이도 실행할 수 있습니다(단, Passkey “승인”을 위해 Safari는 열립니다).
 
 ```bash
-# 등록
+# 등록 (토큰: VAULT_TOKEN, ~/.vault-token, 또는 --vault-token)
 .build/release/vault-login-passkey cli register \
   --vault-addr http://localhost:8200 \
-  --mount-path auth/passkey \
-  --user-handle gs.lee
+  --mount-path auth/passkey
 
-# 로그인(= ~/.vault-token 저장)
+# 로그인(= ~/.vault-token 저장); user-handle = entity name
 .build/release/vault-login-passkey cli login \
   --vault-addr http://localhost:8200 \
   --mount-path auth/passkey \
-  --user-handle gs.lee \
+  --user-handle my-entity-name \
   --role default
 ```
-
-### Safari에 \"Continue\" 버튼이 뜨는 이유
-
-WebAuthn(`navigator.credentials.create()` / `navigator.credentials.get()`)은 브라우저/웹킷 정책상 **사용자 제스처(user gesture)** 이후에만 호출이 허용되는 경우가 많습니다.\n+자동 실행을 시도하면 `NotAllowedError`로 막히는 등 동작이 불안정해질 수 있어, 안정성을 위해 한 번의 클릭(**Continue**)으로 제스처를 확보한 뒤 Passkey를 트리거합니다.
 
 ## 보안/운영 주의사항
 
 - **외부 IdP 없음**: Passkey(WebAuthn) 서명은 사용자 단말에서 생성되고, Vault auth 플러그인이 이를 검증해 토큰을 발급합니다.
-- **`user_handle`가 계정 키**: 플러그인은 `identity alias Name=user_handle`로 매핑합니다. 변경되지 않는 값을 쓰세요.
+- **등록은 EntityID가 있는 토큰 필요**: `register/*`는 인증 필수이며, passkey principal은 토큰의 **entity name**입니다(클라이언트가 임의로 바꿀 수 없음).
+- **등록 시 entity-alias(가능할 때만)**: Vault가 `ForwardGenericRequest`를 주면 `register/finish`에서 멱등으로 **entity-alias**를 만듦(이름은 `passkey_`+8hex, entity id·mount accessor로 결정적, `canonical_id`는 등록 주체 entity). 같은 mount에 잘못된 이름의 기존 alias가 있으면 삭제 후 교체합니다. 없으면 등록은 성공하고 경고만 나갈 수 있으나, 로그인 시에도 동일 `passkey_*` **Alias.Name**으로 entity에 붙습니다.
+- **로그인 시 `user_handle`**: 등록 시 쓴 **principal**(entity 이름 또는 id)과 같아야 합니다. 이름이 비어 있어 id로 등록한 경우 id를 쓰거나, 헬퍼의 토큰 기반 자동 결정을 사용하세요.
 - **RP ID / Origin 일치**: `rp_id`와 `allowed_origins`가 배포 환경과 정확히 일치해야 합니다(불일치 시 검증 실패).
 - **Challenge TTL**: 기본은 짧습니다. 승인 시간이 길어 자주 만료되면 `challenge_ttl`을 늘리세요.
 
@@ -212,4 +256,5 @@ WebAuthn(`navigator.credentials.create()` / `navigator.credentials.get()`)은 �
   - RP ID / Origin 불일치가 가장 흔한 원인입니다.
   - macOS/WebKit 버전에 따라 WKWebView의 WebAuthn 지원이 제한될 수 있습니다.
 - **`no registered credentials for user_handle`**: 해당 `user_handle`로 먼저 등록(`register/*`)을 완료해야 합니다.
+- **브라우저: `The length options.user.id must be between 1-64 bytes`**: 플러그인은 WebAuthn `user.id`를 항상 **SHA-256(principal)** 32바이트로 고정하고, Vault 저장·로그인 키는 문자열 `user_handle`입니다. Safari 헬퍼는 JSON이 base64 문자열이든 바이트 배열이든 `user.id`를 정규화합니다. 예전 빌드로 등록한 패스키는 **다시 등록**하세요.
 

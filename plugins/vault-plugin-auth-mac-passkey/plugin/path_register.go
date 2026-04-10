@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -17,8 +18,8 @@ func pathRegisterBegin(b *backend) *framework.Path {
 	return &framework.Path{
 		Pattern: "register/begin",
 		Fields: map[string]*framework.FieldSchema{
-			"user_handle": {Type: framework.TypeString, Required: true},
-			"user_name":   {Type: framework.TypeString, Required: false},
+			"user_handle": {Type: framework.TypeString, Required: false, Description: "Ignored unless set; if set, must equal the derived passkey principal (entity name, or entity id if name is empty)."},
+			"user_name":   {Type: framework.TypeString, Required: false, Description: "Optional WebAuthn display name; defaults to entity name."},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{Callback: b.handleRegisterBegin},
@@ -68,11 +69,36 @@ func (b *backend) handleRegisterBegin(ctx context.Context, req *logical.Request,
 		return nil, err
 	}
 
-	userHandle := d.Get("user_handle").(string)
-	if cfg.AllowedUserHandleRegex != "" {
+	if req.ClientToken == "" {
+		return logical.ErrorResponse("a valid Vault token is required for passkey registration"), nil
+	}
+	if req.EntityID == "" {
+		return logical.ErrorResponse("token must be associated with an identity entity (EntityID); log in with an auth method that creates entity aliases first"), nil
+	}
+
+	entity, err := b.System().EntityInfo(req.EntityID)
+	if err != nil {
+		return nil, err
+	}
+	userHandle := ""
+	if entity != nil {
+		userHandle = strings.TrimSpace(entity.GetName())
+	}
+	if userHandle == "" {
+		userHandle = req.EntityID
+	}
+
+	if v, ok := d.GetOk("user_handle"); ok {
+		if s := v.(string); s != "" && s != userHandle {
+			return logical.ErrorResponse("user_handle does not match derived passkey principal for this token"), nil
+		}
+	}
+
+	skipHandleRegex := userHandle == req.EntityID
+	if cfg.AllowedUserHandleRegex != "" && !skipHandleRegex {
 		re, _ := regexp.Compile(cfg.AllowedUserHandleRegex)
 		if !re.MatchString(userHandle) {
-			return logical.ErrorResponse("user_handle is not allowed"), nil
+			return logical.ErrorResponse("passkey principal (entity name) is not allowed by allowed_user_handle_regex"), nil
 		}
 	}
 	userName := d.Get("user_name").(string)
@@ -81,7 +107,7 @@ func (b *backend) handleRegisterBegin(ctx context.Context, req *logical.Request,
 	}
 
 	u := &webauthnUser{
-		id:          []byte(userHandle),
+		id:          webauthnUserIDBytes(userHandle),
 		name:        userName,
 		displayName: userName,
 		creds:       nil,
@@ -101,6 +127,7 @@ func (b *backend) handleRegisterBegin(ctx context.Context, req *logical.Request,
 	ps := &pendingSession{
 		Kind:       "register",
 		RPID:       cfg.RPID,
+		EntityID:   req.EntityID,
 		UserHandle: userHandle,
 		Session:    *sessData,
 		CreatedAt:  now,
@@ -143,6 +170,13 @@ func (b *backend) handleRegisterFinish(ctx context.Context, req *logical.Request
 		return logical.ErrorResponse("session expired"), nil
 	}
 
+	if req.ClientToken == "" || req.EntityID == "" {
+		return logical.ErrorResponse("a valid Vault token is required for passkey registration"), nil
+	}
+	if ps.EntityID == "" || ps.EntityID != req.EntityID {
+		return logical.ErrorResponse("registration session does not match the current token identity"), nil
+	}
+
 	credJSONb64 := d.Get("credential").(string)
 	credJSON, err := base64.RawURLEncoding.DecodeString(credJSONb64)
 	if err != nil {
@@ -150,7 +184,7 @@ func (b *backend) handleRegisterFinish(ctx context.Context, req *logical.Request
 	}
 
 	u := &webauthnUser{
-		id:          []byte(ps.UserHandle),
+		id:          webauthnUserIDBytes(ps.UserHandle),
 		name:        ps.UserHandle,
 		displayName: ps.UserHandle,
 		creds:       nil,
@@ -165,25 +199,40 @@ func (b *backend) handleRegisterFinish(ctx context.Context, req *logical.Request
 		return logical.ErrorResponse("webauthn registration failed: %v", err), nil
 	}
 
+	_, aliasWarnings, aliasErr := b.ensurePasskeyEntityAlias(ctx, req, ps.EntityID)
+	if aliasErr != nil {
+		return logical.ErrorResponse("identity alias creation failed: %v", aliasErr), nil
+	}
+
 	rec := &credentialRecord{
-		RPID:         cfg.RPID,
-		UserHandle:   ps.UserHandle,
-		CredentialID: parsedResponse.ID,
-		PublicKey:    parsedResponse.PublicKey,
-		SignCount:    parsedResponse.Authenticator.SignCount,
-		BackupEligible: parsedResponse.Flags.BackupEligible,
-		BackupState:    parsedResponse.Flags.BackupState,
+		RPID:              cfg.RPID,
+		UserHandle:        ps.UserHandle,
+		EntityID:          ps.EntityID,
+		IdentityAliasName: passkeyIdentityAliasName(ps.EntityID, req.MountAccessor),
+		CredentialID:      parsedResponse.ID,
+		PublicKey:         parsedResponse.PublicKey,
+		SignCount:         parsedResponse.Authenticator.SignCount,
+		BackupEligible:    parsedResponse.Flags.BackupEligible,
+		BackupState:       parsedResponse.Flags.BackupState,
 	}
 	if err := saveCredential(ctx, req.Storage, rec); err != nil {
 		return nil, err
 	}
 	_ = deleteSession(ctx, req.Storage, sessionID)
 
-	return &logical.Response{Data: map[string]any{
+	data := map[string]any{
 		"registered":      true,
 		"user_handle":     rec.UserHandle,
 		"credential_id":   base64.RawURLEncoding.EncodeToString(rec.CredentialID),
 		"backup_eligible": parsedResponse.Flags.BackupEligible,
 		"backup_state":    parsedResponse.Flags.BackupState,
-	}}, nil
+	}
+	if s := strings.TrimSpace(rec.IdentityAliasName); s != "" {
+		data["identity_alias_name"] = s
+	}
+	resp := &logical.Response{Data: data}
+	for _, w := range aliasWarnings {
+		resp.AddWarning(w)
+	}
+	return resp, nil
 }

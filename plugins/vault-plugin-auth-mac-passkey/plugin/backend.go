@@ -28,7 +28,6 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		Paths:          b.paths(),
 		PathsSpecial: &logical.Paths{
 			Unauthenticated: []string{
-				"register/*",
 				"login/*",
 			},
 		},

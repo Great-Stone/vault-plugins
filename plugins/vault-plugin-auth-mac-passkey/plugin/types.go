@@ -36,19 +36,24 @@ type roleEntry struct {
 }
 
 type credentialRecord struct {
-	RPID         string `json:"rp_id"`
-	UserHandle   string `json:"user_handle"`
-	CredentialID []byte `json:"credential_id"`
-	PublicKey    []byte `json:"public_key_cose"`
-	SignCount    uint32 `json:"sign_count"`
-	BackupEligible bool `json:"backup_eligible"`
-	BackupState    bool `json:"backup_state"`
+	RPID       string `json:"rp_id"`
+	UserHandle string `json:"user_handle"`
+	EntityID   string `json:"entity_id,omitempty"`
+	// IdentityAliasName is the deterministic Vault identity entity-alias name on this auth mount (passkey_ + 8 hex).
+	// Login uses the same derivation from entity id + mount accessor; this field is informational / cache.
+	IdentityAliasName string `json:"identity_alias_name,omitempty"`
+	CredentialID      []byte `json:"credential_id"`
+	PublicKey         []byte `json:"public_key_cose"`
+	SignCount         uint32 `json:"sign_count"`
+	BackupEligible    bool   `json:"backup_eligible"`
+	BackupState       bool   `json:"backup_state"`
 }
 
 type pendingSession struct {
 	Kind       string               `json:"kind"` // "register" or "login"
 	RPID       string               `json:"rp_id"`
 	RoleName   string               `json:"role_name,omitempty"`
+	EntityID   string               `json:"entity_id,omitempty"` // register: caller entity at begin/finish
 	UserHandle string               `json:"user_handle"`
 	Session    webauthn.SessionData `json:"session"`
 	CreatedAt  time.Time            `json:"created_at"`

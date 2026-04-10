@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -61,13 +62,17 @@ func (b *backend) handleLoginBegin(ctx context.Context, req *logical.Request, d 
 	}
 
 	userHandle := d.Get("user_handle").(string)
-	if cfg.AllowedUserHandleRegex != "" {
+	skipHandleRegex := false
+	if _, err := uuid.Parse(strings.TrimSpace(userHandle)); err == nil {
+		skipHandleRegex = true
+	}
+	if cfg.AllowedUserHandleRegex != "" && !skipHandleRegex {
 		re, _ := regexp.Compile(cfg.AllowedUserHandleRegex)
 		if !re.MatchString(userHandle) {
 			return logical.ErrorResponse("user_handle is not allowed"), nil
 		}
 	}
-	if role.AllowedUserHandleRegex != "" {
+	if role.AllowedUserHandleRegex != "" && !skipHandleRegex {
 		re, _ := regexp.Compile(role.AllowedUserHandleRegex)
 		if !re.MatchString(userHandle) {
 			return logical.ErrorResponse("user_handle is not allowed for this role"), nil
@@ -83,7 +88,7 @@ func (b *backend) handleLoginBegin(ctx context.Context, req *logical.Request, d 
 	}
 
 	u := &webauthnUser{
-		id:          []byte(userHandle),
+		id:          webauthnUserIDBytes(userHandle),
 		name:        userHandle,
 		displayName: userHandle,
 		creds:       creds,
@@ -150,7 +155,7 @@ func (b *backend) handleLoginFinish(ctx context.Context, req *logical.Request, d
 	}
 
 	u := &webauthnUser{
-		id:          []byte(ps.UserHandle),
+		id:          webauthnUserIDBytes(ps.UserHandle),
 		name:        ps.UserHandle,
 		displayName: ps.UserHandle,
 		creds:       nil, // loaded below
@@ -169,7 +174,7 @@ func (b *backend) handleLoginFinish(ctx context.Context, req *logical.Request, d
 	if err != nil {
 		return logical.ErrorResponse("webauthn credential parse failed: %v", err), nil
 	}
-	_, err = wa.ValidateLogin(u, ps.Session, parsed)
+	loginCred, err := wa.ValidateLogin(u, ps.Session, parsed)
 	if err != nil {
 		return logical.ErrorResponse("webauthn assertion failed: %v", err), nil
 	}
@@ -182,11 +187,35 @@ func (b *backend) handleLoginFinish(ctx context.Context, req *logical.Request, d
 		return logical.ErrorResponse("unknown role"), nil
 	}
 
+	entityID := ""
+	var credentialRec *credentialRecord
+	if loginCred != nil {
+		if rec, err := loadCredentialByID(ctx, req.Storage, cfg.RPID, loginCred.ID); err == nil && rec != nil {
+			entityID = rec.EntityID
+			credentialRec = rec
+		}
+	}
+
+	// Never use WebAuthn user_handle as Auth.Alias.Name when we know the entity: Vault would create
+	// a misleading alias (often equal to entity name) and can fork identity. Use the same passkey_*
+	// name as enrollment (deterministic from entity id + mount accessor).
+	aliasName := ps.UserHandle
+	if entityID != "" && req.MountAccessor != "" {
+		if n := passkeyIdentityAliasName(entityID, req.MountAccessor); n != "" {
+			aliasName = n
+		}
+	} else if credentialRec != nil {
+		if s := strings.TrimSpace(credentialRec.IdentityAliasName); s != "" {
+			aliasName = s
+		}
+	}
+
 	// Issue Vault token.
 	auth := &logical.Auth{
 		DisplayName: ps.UserHandle,
+		EntityID:    entityID,
 		Alias: &logical.Alias{
-			Name: ps.UserHandle,
+			Name: aliasName,
 		},
 		Metadata: map[string]string{
 			"user_handle": ps.UserHandle,

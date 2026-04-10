@@ -4,7 +4,7 @@ Korean documentation (한국어): [`README.ko.md`](./README.ko.md)
 
 Vault auth method plugin that issues Vault tokens using WebAuthn passkeys (e.g. macOS Touch ID).
 
-This plugin is designed to be used with a **local client helper** on macOS that performs the WebAuthn ceremonies and calls this auth method.
+It is meant to be used together with a **local helper on macOS** (the Vault server performs WebAuthn verification and token issuance; Touch ID / Passkey approval runs on the user’s machine).
 
 ## Vault paths (high-level)
 
@@ -18,15 +18,15 @@ Assuming you enable the auth method at `auth/passkey/`:
 ## Requirements
 
 - Vault with plugin support
-- A working HTTPS endpoint for Vault (recommended for WebAuthn)
-- A stable **RP ID** (DNS name) and browser **origin** list
-- A macOS local helper. This repo includes one:
-  - `localhelper/vault-login-passkey-macos` (WKWebView-based)
-  - `localhelper/vault-login-passkey-macos-app` (macOS `.app` with settings UI; uses Safari for WebAuthn)
+- (Recommended) HTTPS for the Vault endpoint (for WebAuthn)
+- A stable **RP ID** (DNS name) and allowed **Origin** list
+- A macOS local helper. This repo includes:
+  - `localhelper/vault-login-passkey-macos` (WKWebView-based helper)
+  - `localhelper/vault-login-passkey-macos-app` (macOS `.app` with a settings UI; WebAuthn via Safari)
 
 ## Workflow
 
-The auth plugin verifies WebAuthn assertions and issues Vault tokens, while the Passkey ceremony happens on the client (browser/local helper).
+**Passkey (WebAuthn) verification and token issuance are done by Vault (the auth plugin)**; **Passkey approval (Touch ID / Face ID, etc.) runs on the user’s device** (browser / local helper).
 
 ```mermaid
 sequenceDiagram
@@ -36,29 +36,34 @@ sequenceDiagram
   participant Vault as Vault(AuthPlugin)
 
   User->>Helper: Run register/login
-  Helper->>Vault: POST register|login/begin
+  Helper->>Vault: POST register|login/begin (register: X-Vault-Token)
   Vault-->>Helper: session_id + options(WebAuthn)
   Helper->>Safari: Open http://localhost:8765
-  User->>Safari: Click Continue(user_gesture)
+  User->>Safari: Click Continue (user gesture)
   Safari->>Safari: navigator.credentials.create|get()
   Safari->>Helper: POST /result(PublicKeyCredential JSON)
-  Helper->>Vault: POST register|login/finish(credential)
+  Helper->>Vault: POST register|login/finish(credential) (register: X-Vault-Token)
   Vault-->>Helper: (register) stored / (login) token issued
-  Helper-->>User: Write ~/.vault-token(optional) and show result
+  Helper-->>User: Write ~/.vault-token (optional) and show result
 ```
 
 ## API
 
 All endpoints are under your mount path (example: `auth/passkey/`).
 
-- `POST register/begin` with `user_handle`, optional `user_name`
+- `POST register/begin` (**requires** `X-Vault-Token` with an identity **EntityID**)
+  - optional `user_name` (WebAuthn display name; defaults to the derived passkey principal)
+  - optional `user_handle`: if set, must equal the derived principal (otherwise rejected)
+  - passkey principal is the entity **name** when non-empty; if the entity has **no name**, the principal is the **entity id** string (clients cannot pick a different subject)
+  - WebAuthn `user.id` is always **SHA-256(UTF-8 principal)** (32 bytes); the string principal is still used as Vault `user_handle`
   - returns: `session_id`, `options` (WebAuthn `PublicKeyCredentialCreationOptions`)
-- `POST register/finish` with `session_id`, `credential`
+- `POST register/finish` with `session_id`, `credential` (**same token** as begin; same EntityID as the session)
   - `credential`: base64url-encoded JSON bytes of browser `PublicKeyCredential` response
+  - on success: stores the credential; **best-effort** attaches an **identity entity-alias** to the enrolling entity’s **canonical id** on this auth mount (idempotent). The alias **name** is deterministically `passkey_` plus 8 hex chars derived from the entity id and mount accessor (not the WebAuthn `user_handle`). Legacy aliases on that mount whose name equals the old principal (e.g. entity name) are removed and replaced. If `ForwardGenericRequest` is unavailable, enrollment can still succeed with a **warning**, but login responses still set `Auth.Alias.Name` to the same `passkey_*` pattern so tokens attach to the correct entity.
 - `POST login/begin` with `role`, `user_handle`
   - returns: `session_id`, `options` (WebAuthn `PublicKeyCredentialRequestOptions`)
 - `POST login/finish` with `session_id`, `credential`
-  - returns Vault `auth` with identity alias `Name=user_handle`
+  - returns Vault `auth` with identity alias **Name** set to the same deterministic `passkey_xxxxxxxx` as enrollment; **metadata** still carries `user_handle` (principal)
 
 ## Configuration
 
@@ -68,7 +73,7 @@ All endpoints are under your mount path (example: `auth/passkey/`).
 |---|---:|---|---|
 | `rp_id` | yes | WebAuthn RP ID | `localhost` |
 | `allowed_origins` | yes | Allowed origins for WebAuthn verification | `http://localhost:8765` |
-| `allowed_user_handle_regex` | no | Global `user_handle` validation regex (register + login) | `^[a-z0-9_.-]+$` |
+| `allowed_user_handle_regex` | no | Validates the passkey principal when it is the **entity name** (register + login). **Not applied** when the principal is the **entity id** (name empty). | `^[a-z0-9_.-]+$` |
 | `challenge_ttl` | no | Challenge TTL (default `2m`) | `2m` |
 
 ### role (`auth/passkey/role/<name>`)
@@ -120,7 +125,7 @@ vault plugin register -sha256="$SHA256" -command="vault-plugin-auth-mac-passkey"
 vault auth enable -path=passkey -plugin-name=vault-plugin-auth-mac-passkey plugin
 ```
 
-### Register & enable (example)
+### WebAuthn configuration and role
 
 Configure WebAuthn:
 
@@ -140,6 +145,16 @@ vault write auth/passkey/role/default \
   max_ttl="24h"
 ```
 
+### Bootstrap: entity + primary login, then passkey enrollment
+
+Passkey registration is only allowed with a Vault token that already has an **identity entity** (non-empty `EntityID`). A typical flow:
+
+1. Create an entity (or use an existing one), e.g. name `alice`.
+2. Log in with **userpass** (or another method) so the token is tied to that entity.
+3. Call `register/begin` and `register/finish` with **`X-Vault-Token`** set to that token. The plugin uses the entity **name** (or id) as the WebAuthn principal / `user_handle`, and when Vault supports it attaches a **passkey mount entity-alias** to that entity (deterministic `passkey_` + 8 hex chars from entity id + mount accessor).
+
+**Login** (`login/*`) stays unauthenticated: the user supplies the same **principal** (entity name, or entity id if enrolled that way) as `user_handle`. The macOS helper can derive it from a Vault token via `auth/token/lookup-self` and, when permitted, `identity/entity/id/...` for the human-readable name.
+
 ## Quickstart (end-to-end)
 
 1) Build and run the macOS local helper:
@@ -152,18 +167,50 @@ swift build -c release
 
 2) Fill in the UI fields:
 
-- Vault address: `https://vault.example.com`
+- Vault address: for example `https://vault.example.com`
 - Mount path: `auth/passkey`
-- User handle: a stable identifier (recommended: employeeId/username, not email)
-- Role: `default`
+- **Vault token**: required for **Register**; optional for **Login** — when present (field / `VAULT_TOKEN` / `~/.vault-token`), the helper can call **lookup-self** (and **identity/entity/id** if your policy allows) to resolve `user_handle` automatically.
+- **user_handle** (login): optional; if left empty while a suitable token is available, the helper derives the principal for you.
+- **Display name**: optional WebAuthn display name at registration.
+- **Role**: used at login (e.g. `default`).
 
-3) Click **Register passkey**, then **Login**.
+**If you do not have `~/.vault-token` yet (first-time testing)**  
+Passkey **registration** needs a Vault token with an Identity **EntityID**. For local setups, the simplest path is to create a **userpass** user, log in, and store that token in `~/.vault-token`.
 
-On success, the helper writes the Vault token to `~/.vault-token`, so `vault status` should work immediately.
+The following is a **dev / lab** example (`password=demo`, etc.). Use strong passwords and least-privilege policies in real environments.
+
+```bash
+export VAULT_ADDR=http://127.0.0.1:8200
+# Dev mode or another admin token you already use
+export VAULT_TOKEN=...   # e.g. dev root token
+
+# Enable userpass (ignore errors if it is already enabled)
+vault auth enable userpass 2>/dev/null || true
+
+# Sample user: username demo, password demo, policy default
+vault write auth/userpass/users/demo password=demo policies=default
+
+# Issue a login token and write it to ~/.vault-token (strip trailing newlines)
+TOKEN="$(vault write -field=token auth/userpass/login/demo password=demo | tr -d '\n\r')"
+printf '%s' "$TOKEN" > ~/.vault-token
+chmod 600 ~/.vault-token
+
+# Drop the env token and confirm the file token works
+unset VAULT_TOKEN
+vault status
+vault token lookup
+test -s ~/.vault-token && echo "~/.vault-token OK ($(wc -c < ~/.vault-token) bytes)"
+```
+
+If **`entity_id`** in `vault token lookup` is non-empty, you can usually proceed with **Register passkey** in the helper (recent Vault often auto-creates an entity on userpass login). If **`entity_id`** is empty, follow **Bootstrap: entity + primary login, then passkey enrollment** above to create/link an entity and alias first.
+
+3) Click **Register passkey** (the token from the previous step may come from the Vault token field, `~/.vault-token`, or `VAULT_TOKEN`), then **Login**.
+
+On success, the helper **overwrites `~/.vault-token` with the token from passkey login**, so `vault status` should then reflect that new token.
 
 ### macOS `.app` helper (settings UI, optional)
 
-You can also use the bundled `.app` helper with a settings UI:
+Instead of the CLI/UI binary, you can use the bundled `.app` helper with a settings UI:
 
 ```bash
 cd localhelper/vault-login-passkey-macos-app
@@ -174,31 +221,28 @@ open "./dist/VaultLoginPasskey.app"
 
 ### CLI helper (optional)
 
-You can also run the helper without its UI:
+You can run the helper without the WK UI (Safari still opens for Passkey approval):
 
 ```bash
-# Register
+# Register (token: VAULT_TOKEN, ~/.vault-token, or --vault-token)
 .build/release/vault-login-passkey cli register \
   --vault-addr http://localhost:8200 \
-  --mount-path auth/passkey \
-  --user-handle gs.lee
+  --mount-path auth/passkey
 
-# Login (writes ~/.vault-token)
+# Login (writes ~/.vault-token); user-handle = entity name
 .build/release/vault-login-passkey cli login \
   --vault-addr http://localhost:8200 \
   --mount-path auth/passkey \
-  --user-handle gs.lee \
+  --user-handle my-entity-name \
   --role default
 ```
 
-### Why does Safari show a \"Continue\" button?
-
-WebAuthn calls (`navigator.credentials.create()` / `navigator.credentials.get()`) are commonly restricted to run only after a **user gesture**.\n+To keep the flow reliable across browser/WebKit versions, the helper page asks you to click **Continue** once before triggering Passkey.
-
 ## Security and operational notes
 
-- **No external IdP**: WebAuthn ceremonies happen on the client, and Vault verifies assertions in the auth plugin.
-- **`user_handle` is the identity key**: the plugin sets Vault identity alias `Name=user_handle`. Use a stable ID.
+- **No external IdP**: WebAuthn assertions are created on the user’s device; the Vault auth plugin verifies them and issues tokens.
+- **Enrollment requires a token with EntityID**: `register/*` is authenticated; the passkey principal is the **entity name** from that token (not a client-chosen subject).
+- **Identity alias at enrollment (best-effort)**: when Vault exposes `ForwardGenericRequest` to the plugin, `register/finish` creates (idempotently) an **entity-alias** on this auth mount named deterministic `passkey_`+8hex with `canonical_id` set to the enrolling entity; wrong legacy names on that mount are deleted first. Login always uses the same `passkey_*` **Alias.Name** when `EntityID` is known so Vault does not create a duplicate alias named after `user_handle`. If forwarding is unsupported, registration may warn, but login still uses the deterministic alias name.
+- **`user_handle` at login**: must match the **principal** you enrolled with (entity **name** or **entity id** if you enrolled with an unnamed entity). Use the id in that case, or let the helper resolve the principal from a token when possible.
 - **TLS/Origins**: make sure `rp_id` and `allowed_origins` match your deployment (mismatches cause verification failures).
 - **Challenge TTL**: default is short. If users regularly time out while approving Touch ID, increase `challenge_ttl`.
 
@@ -209,4 +253,5 @@ WebAuthn calls (`navigator.credentials.create()` / `navigator.credentials.get()`
   - RP ID and Origin mismatch is the most common cause.
   - Ensure the local helper is allowed to run WebAuthn on your macOS/WebKit version.
 - **`no registered credentials for user_handle`**: run `register/begin` + `register/finish` first for that `user_handle`.
+- **Browser: “The length options.user.id must be between 1-64 bytes”**: The plugin always sets WebAuthn `user.id` to **SHA-256(principal)** (32 bytes); Vault still stores and looks up credentials by the string `user_handle`. The Safari helper normalizes `user.id` whether the JSON uses base64url strings or byte arrays. **Re-enroll** passkeys if you previously enrolled with an older plugin build.
 
