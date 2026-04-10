@@ -26,17 +26,18 @@ func (b *backend) handleDebugUserRead(ctx context.Context, req *logical.Request,
 	if err != nil {
 		return nil, err
 	}
-	if err := requireConfigured(cfg); err != nil {
-		return logical.ErrorResponse(err.Error()), nil
+	eff, err := effectivePasskeyConfig(cfg)
+	if err != nil {
+		return logical.ErrorResponse("%s", err.Error()), nil
 	}
 
 	userHandle := d.Get("user_handle").(string)
-	idx, err := loadUserIndex(ctx, req.Storage, cfg.RPID, userHandle)
+	idx, err := loadUserIndex(ctx, req.Storage, eff.RPID, userHandle)
 	if err != nil {
 		return nil, err
 	}
 	return &logical.Response{Data: map[string]any{
-		"rp_id":          cfg.RPID,
+		"rp_id":          eff.RPID,
 		"user_handle":    userHandle,
 		"credential_ids": idx.CredentialIDs,
 		"count":          len(idx.CredentialIDs),

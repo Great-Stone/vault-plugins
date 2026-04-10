@@ -19,7 +19,7 @@ Auth method를 `auth/passkey/`로 enable 했다고 가정하면:
 
 - 플러그인을 사용할 수 있는 Vault
 - (권장) Vault의 HTTPS 엔드포인트(WebAuthn 검증을 위해)
-- 안정적인 **RP ID(DNS 이름)** 및 허용 **Origin** 목록
+- 운영 환경에서는 Vault 접근에 맞는 **RP ID(DNS 이름)** 및 허용 **Origin** 목록을 명시하는 것이 좋습니다. 로컬 번들 헬퍼만 쓸 때는 설정을 생략해도 기본값이 적용됩니다.
 - macOS 로컬 헬퍼(LocalHelper)
   - 이 저장소에는 WKWebView 기반 헬퍼가 포함되어 있습니다: `localhelper/vault-login-passkey-macos`
   - 설정 UI가 포함된 macOS `.app`도 포함되어 있습니다: `localhelper/vault-login-passkey-macos-app` (Safari로 WebAuthn 수행)
@@ -72,8 +72,8 @@ sequenceDiagram
 
 | 항목 | 필수 | 설명 | 예시 |
 |---|---:|---|---|
-| `rp_id` | O | WebAuthn RP ID | `localhost` |
-| `allowed_origins` | O | WebAuthn 검증에 허용할 origin 목록 | `http://localhost:8765` |
+| `rp_id` | X | 비어 있으면 `localhost`. 실제 서비스 도메인을 쓰는 경우에는 반드시 해당 DNS 이름(예: `vault.example.com`)을 지정하세요. | `localhost` |
+| `allowed_origins` | X | 비어 있고 `rp_id`가 `localhost` 또는 `127.0.0.1`이면 번들 헬퍼용으로 `http://localhost:8765`, `http://127.0.0.1:8765`가 기본 적용됩니다. 그 외 `rp_id`에서는 **반드시** 허용 origin을 나열해야 합니다. | `https://vault.example.com` |
 | `allowed_user_handle_regex` | X | principal이 **entity name**일 때만 검증(등록/로그인). principal이 **entity id**인 경우(이름 없음)에는 적용하지 않음 | `^[a-z0-9_.-]+$` |
 | `challenge_ttl` | X | 챌린지 유효시간(기본 `2m`) | `2m` |
 
@@ -130,14 +130,23 @@ vault auth enable -path=passkey -plugin-name=vault-plugin-auth-mac-passkey plugi
 
 ### Register & enable (example)
 
-WebAuthn 설정:
+WebAuthn 설정(로컬 번들 헬퍼만 사용할 때는 `rp_id` / `allowed_origins` 생략 가능):
+
+```bash
+# 최소 예: 기본 RP ID(localhost) + 기본 origin(8765) + 챌린지 TTL
+vault write auth/passkey/config challenge_ttl="2m"
+```
+
+명시적으로 적을 때(운영·커스텀 origin 등):
 
 ```bash
 vault write auth/passkey/config \
   rp_id="localhost" \
-  allowed_origins="http://localhost:8765" \
+  allowed_origins="http://localhost:8765,http://127.0.0.1:8765" \
   challenge_ttl="2m"
 ```
+
+`vault read auth/passkey/config`에는 실제 적용 값과 함께 `rp_id_uses_default`, `allowed_origins_use_localhost_defaults` 플래그가 포함될 수 있습니다(저장소에 값이 비어 있을 때 기본이 쓰인 경우).
 
 role 생성:
 

@@ -44,10 +44,11 @@ func (b *backend) handleLoginBegin(ctx context.Context, req *logical.Request, d 
 	if err != nil {
 		return nil, err
 	}
-	if err := requireConfigured(cfg); err != nil {
-		return logical.ErrorResponse(err.Error()), nil
+	eff, err := effectivePasskeyConfig(cfg)
+	if err != nil {
+		return logical.ErrorResponse("%s", err.Error()), nil
 	}
-	wa, err := (&webauthnConfig{rpID: cfg.RPID, origins: cfg.AllowedOrigins}).toWebAuthn()
+	wa, err := (&webauthnConfig{rpID: eff.RPID, origins: eff.AllowedOrigins}).toWebAuthn()
 	if err != nil {
 		return nil, err
 	}
@@ -66,8 +67,8 @@ func (b *backend) handleLoginBegin(ctx context.Context, req *logical.Request, d 
 	if _, err := uuid.Parse(strings.TrimSpace(userHandle)); err == nil {
 		skipHandleRegex = true
 	}
-	if cfg.AllowedUserHandleRegex != "" && !skipHandleRegex {
-		re, _ := regexp.Compile(cfg.AllowedUserHandleRegex)
+	if eff.AllowedUserHandleRegex != "" && !skipHandleRegex {
+		re, _ := regexp.Compile(eff.AllowedUserHandleRegex)
 		if !re.MatchString(userHandle) {
 			return logical.ErrorResponse("user_handle is not allowed"), nil
 		}
@@ -79,7 +80,7 @@ func (b *backend) handleLoginBegin(ctx context.Context, req *logical.Request, d 
 		}
 	}
 
-	creds, err := loadCredentialsForUser(ctx, req.Storage, cfg.RPID, userHandle)
+	creds, err := loadCredentialsForUser(ctx, req.Storage, eff.RPID, userHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -105,12 +106,12 @@ func (b *backend) handleLoginBegin(ctx context.Context, req *logical.Request, d 
 	now := time.Now().UTC()
 	ps := &pendingSession{
 		Kind:       "login",
-		RPID:       cfg.RPID,
+		RPID:       eff.RPID,
 		RoleName:   roleName,
 		UserHandle: userHandle,
 		Session:    *sessData,
 		CreatedAt:  now,
-		ExpiresAt:  now.Add(cfg.challengeTTL()),
+		ExpiresAt:  now.Add(eff.challengeTTL()),
 	}
 	if err := saveSession(ctx, req.Storage, sessionID, ps); err != nil {
 		return nil, err
@@ -127,10 +128,11 @@ func (b *backend) handleLoginFinish(ctx context.Context, req *logical.Request, d
 	if err != nil {
 		return nil, err
 	}
-	if err := requireConfigured(cfg); err != nil {
-		return logical.ErrorResponse(err.Error()), nil
+	eff, err := effectivePasskeyConfig(cfg)
+	if err != nil {
+		return logical.ErrorResponse("%s", err.Error()), nil
 	}
-	wa, err := (&webauthnConfig{rpID: cfg.RPID, origins: cfg.AllowedOrigins}).toWebAuthn()
+	wa, err := (&webauthnConfig{rpID: eff.RPID, origins: eff.AllowedOrigins}).toWebAuthn()
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +163,7 @@ func (b *backend) handleLoginFinish(ctx context.Context, req *logical.Request, d
 		creds:       nil, // loaded below
 	}
 
-	creds, err := loadCredentialsForUser(ctx, req.Storage, cfg.RPID, ps.UserHandle)
+	creds, err := loadCredentialsForUser(ctx, req.Storage, ps.RPID, ps.UserHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +192,7 @@ func (b *backend) handleLoginFinish(ctx context.Context, req *logical.Request, d
 	entityID := ""
 	var credentialRec *credentialRecord
 	if loginCred != nil {
-		if rec, err := loadCredentialByID(ctx, req.Storage, cfg.RPID, loginCred.ID); err == nil && rec != nil {
+		if rec, err := loadCredentialByID(ctx, req.Storage, ps.RPID, loginCred.ID); err == nil && rec != nil {
 			entityID = rec.EntityID
 			credentialRec = rec
 		}

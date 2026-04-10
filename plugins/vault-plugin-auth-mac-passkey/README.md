@@ -19,7 +19,7 @@ Assuming you enable the auth method at `auth/passkey/`:
 
 - Vault with plugin support
 - (Recommended) HTTPS for the Vault endpoint (for WebAuthn)
-- A stable **RP ID** (DNS name) and allowed **Origin** list
+- In production, set a stable **RP ID** (DNS name) and allowed **Origin** list explicitly. For the bundled local helper only, you can omit them and the plugin applies localhost defaults.
 - A macOS local helper. This repo includes:
   - `localhelper/vault-login-passkey-macos` (WKWebView-based helper)
   - `localhelper/vault-login-passkey-macos-app` (macOS `.app` with a settings UI; WebAuthn via Safari)
@@ -71,8 +71,8 @@ All endpoints are under your mount path (example: `auth/passkey/`).
 
 | Field | Required | Description | Example |
 |---|---:|---|---|
-| `rp_id` | yes | WebAuthn RP ID | `localhost` |
-| `allowed_origins` | yes | Allowed origins for WebAuthn verification | `http://localhost:8765` |
+| `rp_id` | no | Defaults to `localhost` when empty. For a real deployment, set your DNS RP ID (e.g. `vault.example.com`). | `localhost` |
+| `allowed_origins` | no | When empty and `rp_id` is `localhost` or `127.0.0.1`, defaults to `http://localhost:8765` and `http://127.0.0.1:8765` for the bundled helper. For any other `rp_id`, **you must** list allowed origins. | `https://vault.example.com` |
 | `allowed_user_handle_regex` | no | Validates the passkey principal when it is the **entity name** (register + login). **Not applied** when the principal is the **entity id** (name empty). | `^[a-z0-9_.-]+$` |
 | `challenge_ttl` | no | Challenge TTL (default `2m`) | `2m` |
 
@@ -127,14 +127,23 @@ vault auth enable -path=passkey -plugin-name=vault-plugin-auth-mac-passkey plugi
 
 ### WebAuthn configuration and role
 
-Configure WebAuthn:
+Configure WebAuthn (for the bundled local helper you can omit `rp_id` and `allowed_origins`):
+
+```bash
+# Minimal: default RP ID + default helper origins + challenge TTL
+vault write auth/passkey/config challenge_ttl="2m"
+```
+
+Explicit example:
 
 ```bash
 vault write auth/passkey/config \
   rp_id="localhost" \
-  allowed_origins="http://localhost:8765" \
+  allowed_origins="http://localhost:8765,http://127.0.0.1:8765" \
   challenge_ttl="2m"
 ```
+
+`vault read auth/passkey/config` includes `rp_id_uses_default` and `allowed_origins_use_localhost_defaults` when the stored values were empty and defaults were applied.
 
 Create a role:
 

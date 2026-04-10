@@ -60,11 +60,12 @@ func (b *backend) handleRegisterBegin(ctx context.Context, req *logical.Request,
 	if err != nil {
 		return nil, err
 	}
-	if err := requireConfigured(cfg); err != nil {
-		return logical.ErrorResponse(err.Error()), nil
+	eff, err := effectivePasskeyConfig(cfg)
+	if err != nil {
+		return logical.ErrorResponse("%s", err.Error()), nil
 	}
 
-	wa, err := (&webauthnConfig{rpID: cfg.RPID, origins: cfg.AllowedOrigins}).toWebAuthn()
+	wa, err := (&webauthnConfig{rpID: eff.RPID, origins: eff.AllowedOrigins}).toWebAuthn()
 	if err != nil {
 		return nil, err
 	}
@@ -95,8 +96,8 @@ func (b *backend) handleRegisterBegin(ctx context.Context, req *logical.Request,
 	}
 
 	skipHandleRegex := userHandle == req.EntityID
-	if cfg.AllowedUserHandleRegex != "" && !skipHandleRegex {
-		re, _ := regexp.Compile(cfg.AllowedUserHandleRegex)
+	if eff.AllowedUserHandleRegex != "" && !skipHandleRegex {
+		re, _ := regexp.Compile(eff.AllowedUserHandleRegex)
 		if !re.MatchString(userHandle) {
 			return logical.ErrorResponse("passkey principal (entity name) is not allowed by allowed_user_handle_regex"), nil
 		}
@@ -126,12 +127,12 @@ func (b *backend) handleRegisterBegin(ctx context.Context, req *logical.Request,
 	now := time.Now().UTC()
 	ps := &pendingSession{
 		Kind:       "register",
-		RPID:       cfg.RPID,
+		RPID:       eff.RPID,
 		EntityID:   req.EntityID,
 		UserHandle: userHandle,
 		Session:    *sessData,
 		CreatedAt:  now,
-		ExpiresAt:  now.Add(cfg.challengeTTL()),
+		ExpiresAt:  now.Add(eff.challengeTTL()),
 	}
 	if err := saveSession(ctx, req.Storage, sessionID, ps); err != nil {
 		return nil, err
@@ -148,11 +149,12 @@ func (b *backend) handleRegisterFinish(ctx context.Context, req *logical.Request
 	if err != nil {
 		return nil, err
 	}
-	if err := requireConfigured(cfg); err != nil {
-		return logical.ErrorResponse(err.Error()), nil
+	eff, err := effectivePasskeyConfig(cfg)
+	if err != nil {
+		return logical.ErrorResponse("%s", err.Error()), nil
 	}
 
-	wa, err := (&webauthnConfig{rpID: cfg.RPID, origins: cfg.AllowedOrigins}).toWebAuthn()
+	wa, err := (&webauthnConfig{rpID: eff.RPID, origins: eff.AllowedOrigins}).toWebAuthn()
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +207,7 @@ func (b *backend) handleRegisterFinish(ctx context.Context, req *logical.Request
 	}
 
 	rec := &credentialRecord{
-		RPID:              cfg.RPID,
+		RPID:              ps.RPID,
 		UserHandle:        ps.UserHandle,
 		EntityID:          ps.EntityID,
 		IdentityAliasName: passkeyIdentityAliasName(ps.EntityID, req.MountAccessor),
