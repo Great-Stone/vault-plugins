@@ -137,6 +137,38 @@ jobs:
             goarch: arm64
             exe: ""
 
+          # auth-mac-passkey
+          - plugin: vault-plugin-auth-mac-passkey
+            plugin_short: auth-mac-passkey
+            goos: linux
+            goarch: amd64
+            exe: ""
+          - plugin: vault-plugin-auth-mac-passkey
+            plugin_short: auth-mac-passkey
+            goos: linux
+            goarch: arm
+            exe: ""
+          - plugin: vault-plugin-auth-mac-passkey
+            plugin_short: auth-mac-passkey
+            goos: linux
+            goarch: arm64
+            exe: ""
+          - plugin: vault-plugin-auth-mac-passkey
+            plugin_short: auth-mac-passkey
+            goos: windows
+            goarch: amd64
+            exe: ".exe"
+          - plugin: vault-plugin-auth-mac-passkey
+            plugin_short: auth-mac-passkey
+            goos: windows
+            goarch: arm64
+            exe: ".exe"
+          - plugin: vault-plugin-auth-mac-passkey
+            plugin_short: auth-mac-passkey
+            goos: darwin
+            goarch: arm64
+            exe: ""
+
     steps:
       - uses: actions/checkout@v4
 

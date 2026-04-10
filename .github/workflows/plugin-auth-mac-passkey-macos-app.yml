@@ -1,0 +1,33 @@
+# macOS .app bundle (vault-login-passkey-macos-app)
+name: auth-mac-passkey macOS app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'plugins/vault-plugin-auth-mac-passkey/localhelper/vault-login-passkey-macos-app/**'
+      - '.github/workflows/plugin-auth-mac-passkey-macos-app.yml'
+  pull_request:
+    paths:
+      - 'plugins/vault-plugin-auth-mac-passkey/localhelper/vault-login-passkey-macos-app/**'
+      - '.github/workflows/plugin-auth-mac-passkey-macos-app.yml'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  macos-app:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build-app.sh
+        working-directory: plugins/vault-plugin-auth-mac-passkey/localhelper/vault-login-passkey-macos-app
+        run: ./build-app.sh
+
+      - name: Verify bundle
+        working-directory: plugins/vault-plugin-auth-mac-passkey/localhelper/vault-login-passkey-macos-app
+        run: test -x dist/VaultLoginPasskey.app/Contents/MacOS/VaultLoginPasskey

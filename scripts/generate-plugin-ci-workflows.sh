@@ -17,6 +17,7 @@ rows=(
   "vault-plugin-secrets-kafka:kafka"
   "vault-plugin-secrets-machine:machine"
   "vault-plugin-secrets-github:github"
+  "vault-plugin-auth-mac-passkey:auth-mac-passkey"
 )
 
 for row in "${rows[@]}"; do

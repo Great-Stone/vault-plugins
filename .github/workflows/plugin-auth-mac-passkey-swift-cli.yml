@@ -1,0 +1,33 @@
+# macOS Swift CLI helper (vault-login-passkey-macos)
+name: auth-mac-passkey Swift CLI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'plugins/vault-plugin-auth-mac-passkey/localhelper/vault-login-passkey-macos/**'
+      - '.github/workflows/plugin-auth-mac-passkey-swift-cli.yml'
+  pull_request:
+    paths:
+      - 'plugins/vault-plugin-auth-mac-passkey/localhelper/vault-login-passkey-macos/**'
+      - '.github/workflows/plugin-auth-mac-passkey-swift-cli.yml'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  swift-cli:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift build (release)
+        working-directory: plugins/vault-plugin-auth-mac-passkey/localhelper/vault-login-passkey-macos
+        run: swift build -c release
+
+      - name: Smoke-run binary
+        working-directory: plugins/vault-plugin-auth-mac-passkey/localhelper/vault-login-passkey-macos
+        run: ./.build/release/vault-login-passkey --help
