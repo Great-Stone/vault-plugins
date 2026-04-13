@@ -47,7 +47,6 @@ sequenceDiagram
   Helper-->>User: ~/.vault-token 저장(선택) 및 결과 표시
 ```
 
-
 ## API
 
 모든 엔드포인트는 마운트 경로 하위에 있습니다. (예: `auth/passkey/`)
@@ -97,7 +96,7 @@ cd plugins/vault-plugin-auth-mac-passkey
 make build
 ```
 
-## 등록 및 활성화(예시)
+### 등록 및 활성화(예시)
 
 `vault-plugin-secrets-machine` README와 동일한 형태로, Vault dev 모드에서 빠르게 확인할 수 있는 예시입니다.
 
@@ -128,7 +127,7 @@ vault auth enable -path=passkey -plugin-name=vault-plugin-auth-mac-passkey plugi
 
 > 참고: Vault 내장 auth method와 달리, 외부 플러그인은 `-plugin-name ... plugin` 형태로 enable 합니다.
 
-### Register & enable (example)
+### WebAuthn 설정 및 role
 
 WebAuthn 설정(로컬 번들 헬퍼만 사용할 때는 `rp_id` / `allowed_origins` 생략 가능):
 
@@ -156,6 +155,18 @@ vault write auth/passkey/role/default \
   ttl="1h" \
   max_ttl="24h"
 ```
+
+### 등록에 쓰는 토큰의 ACL
+
+`register/begin`·`register/finish`는 인증이 필요한 Vault API입니다. 등록에 사용하는 클라이언트 토큰은 해당 경로 호출이 허용되어야 합니다. 내장 **`default`** 정책만으로는 커스텀 플러그인 경로가 열려 있지 않은 경우가 많아, 예를 들어 아래가 필요할 수 있습니다.
+
+```hcl
+path "auth/passkey/register/*" {
+  capabilities = ["update", "create"]
+}
+```
+
+`passkey` 같은 이름으로 정책을 쓴 뒤, 등록에 쓸 userpass 사용자 등에 `policies=default,passkey`처럼 붙입니다. 마운트 경로가 다르면 `auth/passkey` 부분을 맞추세요.
 
 ### 부트스트랩: entity + 1차 로그인 후 passkey 등록
 
@@ -199,24 +210,32 @@ export VAULT_TOKEN=...   # 예: dev 루트 토큰
 # userpass 활성화(이미 켜져 있으면 에러 나도 무시 가능)
 vault auth enable userpass 2>/dev/null || true
 
-# 샘플 사용자: 사용자명 demo, 비밀번호 demo, 정책 default
-vault write auth/userpass/users/demo password=demo policies=default
+# 등록 API 호출을 허용하는 정책(위 「등록에 쓰는 토큰의 ACL」과 동일)
+vault policy write passkey - <<EOF
+path "auth/passkey/register/*" {
+  capabilities = ["update", "create"]
+}
+EOF
+
+# 샘플 사용자: 사용자명 demo, 비밀번호 demo
+vault write auth/userpass/users/demo password=demo policies=default,passkey
 
 # 로그인 토큰만 받아서 ~/.vault-token에 저장(끝에 개행이 붙지 않도록 정리)
-TOKEN="$(vault write -field=token auth/userpass/login/demo password=demo | tr -d '\n\r')"
-printf '%s' "$TOKEN" > ~/.vault-token
-chmod 600 ~/.vault-token
+vault login -method=userpass username=demo password=demo
+
+cat ~/.vault-token
 
 # 환경 변수 토큰을 끄고, 파일 토큰만으로 동작하는지 확인
 unset VAULT_TOKEN
 vault status
 vault token lookup
-test -s ~/.vault-token && echo "~/.vault-token OK ($(wc -c < ~/.vault-token) bytes)"
 ```
 
-`vault token lookup` 출력에 **`entity_id`**가 비어 있지 않으면, 이 토큰으로 헬퍼에서 **Register passkey**를 진행할 수 있는 경우가 많습니다(최근 Vault에서 userpass 로그인 시 entity가 자동 생성되는 흐름). `entity_id`가 없다면 위 문서의 **「부트스트랩: entity + 1차 로그인 후 passkey 등록」** 절에 따라 entity·alias를 먼저 맞추세요.
+`vault token lookup`에서 **`entity_id`**가 비어 있지 않아야 합니다(최근 Vault는 userpass 로그인 시 entity를 자동으로 붙이는 경우가 많음). 비어 있으면 **「부트스트랩: entity + 1차 로그인 후 passkey 등록」**을 따르세요.
 
-3) **Register passkey**(위에서 만든 토큰이 Vault token 필드·`~/.vault-token`·`VAULT_TOKEN` 중 하나로 잡히면 됨) 후 **Login**
+헬퍼는 등록용 토큰을 다음 순서로 고릅니다: **Vault 토큰 필드(비어 있지 않음) → `VAULT_TOKEN` → `~/.vault-token`**. UI에 붙여 넣은 토큰이 파일보다 우선합니다. Finder에서 연 GUI 앱은 셸의 **`VAULT_TOKEN`을 보통 물려받지 않습니다.**
+
+3) **Register passkey** 후 **Login**
 
 성공하면 헬퍼가 `~/.vault-token`을 **패스키 로그인으로 받은 토큰으로 덮어쓰므로**, 이후 `vault status`는 새 토큰 기준으로 동작해야 합니다.
 
@@ -252,18 +271,12 @@ UI 없이도 실행할 수 있습니다(단, Passkey “승인”을 위해 Safa
 ## 보안/운영 주의사항
 
 - **외부 IdP 없음**: Passkey(WebAuthn) 서명은 사용자 단말에서 생성되고, Vault auth 플러그인이 이를 검증해 토큰을 발급합니다.
-- **등록은 EntityID가 있는 토큰 필요**: `register/*`는 인증 필수이며, passkey principal은 토큰의 **entity name**입니다(클라이언트가 임의로 바꿀 수 없음).
+- **등록은 EntityID가 있는 토큰 필요**: `register/*`는 인증 필수이며, passkey principal은 토큰의 **entity name**입니다(클라이언트가 임의로 바꿀 수 없음). 같은 토큰에 `auth/<마운트>/register/*` ACL이 있어야 합니다(**「등록에 쓰는 토큰의 ACL」**).
 - **등록 시 entity-alias(가능할 때만)**: Vault가 `ForwardGenericRequest`를 주면 `register/finish`에서 멱등으로 **entity-alias**를 만듦(이름은 `passkey_`+8hex, entity id·mount accessor로 결정적, `canonical_id`는 등록 주체 entity). 같은 mount에 잘못된 이름의 기존 alias가 있으면 삭제 후 교체합니다. 없으면 등록은 성공하고 경고만 나갈 수 있으나, 로그인 시에도 동일 `passkey_*` **Alias.Name**으로 entity에 붙습니다.
 - **로그인 시 `user_handle`**: 등록 시 쓴 **principal**(entity 이름 또는 id)과 같아야 합니다. 이름이 비어 있어 id로 등록한 경우 id를 쓰거나, 헬퍼의 토큰 기반 자동 결정을 사용하세요.
 - **RP ID / Origin 일치**: `rp_id`와 `allowed_origins`가 배포 환경과 정확히 일치해야 합니다(불일치 시 검증 실패).
 - **Challenge TTL**: 기본은 짧습니다. 승인 시간이 길어 자주 만료되면 `challenge_ttl`을 늘리세요.
 
-## 트러블슈팅
+## Demo
 
-- **`passkey auth is not configured`**: 먼저 `auth/passkey/config`에 `rp_id`, `allowed_origins`를 써야 합니다.
-- **`webauthn assertion failed` / `credential parse failed`**:
-  - RP ID / Origin 불일치가 가장 흔한 원인입니다.
-  - macOS/WebKit 버전에 따라 WKWebView의 WebAuthn 지원이 제한될 수 있습니다.
-- **`no registered credentials for user_handle`**: 해당 `user_handle`로 먼저 등록(`register/*`)을 완료해야 합니다.
-- **브라우저: `The length options.user.id must be between 1-64 bytes`**: 플러그인은 WebAuthn `user.id`를 항상 **SHA-256(principal)** 32바이트로 고정하고, Vault 저장·로그인 키는 문자열 `user_handle`입니다. Safari 헬퍼는 JSON이 base64 문자열이든 바이트 배열이든 `user.id`를 정규화합니다. 예전 빌드로 등록한 패스키는 **다시 등록**하세요.
-
+![Passkey Auth Demo](../../demo/passkey-auth-method.gif)

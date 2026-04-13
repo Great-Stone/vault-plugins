@@ -96,7 +96,7 @@ cd plugins/vault-plugin-auth-mac-passkey
 make build
 ```
 
-## Register & enable (example)
+### Register & enable (example)
 
 This mirrors the structure used in `vault-plugin-secrets-machine` so first-time users can follow an end-to-end setup quickly.
 
@@ -124,6 +124,8 @@ export VAULT_ADDR=http://localhost:8200
 vault plugin register -sha256="$SHA256" -command="vault-plugin-auth-mac-passkey" auth vault-plugin-auth-mac-passkey
 vault auth enable -path=passkey -plugin-name=vault-plugin-auth-mac-passkey plugin
 ```
+
+> External auth plugins use the `-plugin-name … plugin` form of `vault auth enable`, unlike built-in methods.
 
 ### WebAuthn configuration and role
 
@@ -153,6 +155,18 @@ vault write auth/passkey/role/default \
   ttl="1h" \
   max_ttl="24h"
 ```
+
+### ACL: token used for `register/*`
+
+`register/begin` and `register/finish` are authenticated Vault API calls. The enrolling client token must be allowed to invoke those paths. The built-in **`default`** policy typically does **not** include custom plugin routes, so you often need something like:
+
+```hcl
+path "auth/passkey/register/*" {
+  capabilities = ["update", "create"]
+}
+```
+
+Write it as a named policy (e.g. `passkey`) and attach it to the userpass user (or group) whose token you use for enrollment, e.g. `policies=default,passkey`. Adjust `auth/passkey` if your mount path differs.
 
 ### Bootstrap: entity + primary login, then passkey enrollment
 
@@ -196,13 +210,20 @@ export VAULT_TOKEN=...   # e.g. dev root token
 # Enable userpass (ignore errors if it is already enabled)
 vault auth enable userpass 2>/dev/null || true
 
-# Sample user: username demo, password demo, policy default
-vault write auth/userpass/users/demo password=demo policies=default
+# Policy so the enrollment token may call register/begin and register/finish
+vault policy write passkey - <<EOF
+path "auth/passkey/register/*" {
+  capabilities = ["update", "create"]
+}
+EOF
+
+# Sample user: username demo, password demo
+vault write auth/userpass/users/demo password=demo policies=default,passkey
 
 # Issue a login token and write it to ~/.vault-token (strip trailing newlines)
-TOKEN="$(vault write -field=token auth/userpass/login/demo password=demo | tr -d '\n\r')"
-printf '%s' "$TOKEN" > ~/.vault-token
-chmod 600 ~/.vault-token
+vault login -method=userpass username=demo password=demo
+
+cat ~/.vault-token
 
 # Drop the env token and confirm the file token works
 unset VAULT_TOKEN
@@ -211,9 +232,11 @@ vault token lookup
 test -s ~/.vault-token && echo "~/.vault-token OK ($(wc -c < ~/.vault-token) bytes)"
 ```
 
-If **`entity_id`** in `vault token lookup` is non-empty, you can usually proceed with **Register passkey** in the helper (recent Vault often auto-creates an entity on userpass login). If **`entity_id`** is empty, follow **Bootstrap: entity + primary login, then passkey enrollment** above to create/link an entity and alias first.
+Check `vault token lookup`: **`entity_id`** must be non-empty (recent Vault usually creates an entity on userpass login). If it is empty, follow **Bootstrap: entity + primary login, then passkey enrollment** above.
 
-3) Click **Register passkey** (the token from the previous step may come from the Vault token field, `~/.vault-token`, or `VAULT_TOKEN`), then **Login**.
+The helper resolves the registration token in this order: **non-empty Vault token field → `VAULT_TOKEN` → `~/.vault-token`**. A token pasted in the UI overrides the file. GUI apps launched from Finder often do **not** inherit shell `VAULT_TOKEN`.
+
+3) Click **Register passkey**, then **Login**.
 
 On success, the helper **overwrites `~/.vault-token` with the token from passkey login**, so `vault status` should then reflect that new token.
 
@@ -249,7 +272,7 @@ You can run the helper without the WK UI (Safari still opens for Passkey approva
 ## Security and operational notes
 
 - **No external IdP**: WebAuthn assertions are created on the user’s device; the Vault auth plugin verifies them and issues tokens.
-- **Enrollment requires a token with EntityID**: `register/*` is authenticated; the passkey principal is the **entity name** from that token (not a client-chosen subject).
+- **Enrollment requires a token with EntityID**: `register/*` is authenticated; the passkey principal is the **entity name** from that token (not a client-chosen subject). The same token also needs ACL coverage for `auth/<mount>/register/*` (see **ACL: token used for `register/*`**).
 - **Identity alias at enrollment (best-effort)**: when Vault exposes `ForwardGenericRequest` to the plugin, `register/finish` creates (idempotently) an **entity-alias** on this auth mount named deterministic `passkey_`+8hex with `canonical_id` set to the enrolling entity; wrong legacy names on that mount are deleted first. Login always uses the same `passkey_*` **Alias.Name** when `EntityID` is known so Vault does not create a duplicate alias named after `user_handle`. If forwarding is unsupported, registration may warn, but login still uses the deterministic alias name.
 - **`user_handle` at login**: must match the **principal** you enrolled with (entity **name** or **entity id** if you enrolled with an unnamed entity). Use the id in that case, or let the helper resolve the principal from a token when possible.
 - **TLS/Origins**: make sure `rp_id` and `allowed_origins` match your deployment (mismatches cause verification failures).
@@ -257,6 +280,8 @@ You can run the helper without the WK UI (Safari still opens for Passkey approva
 
 ## Troubleshooting
 
+- **`token must be associated with an identity entity` (HTTP 400 on `register/begin`)**: The `X-Vault-Token` must have a non-empty identity `entity_id` (`vault token lookup`). Root tokens often have no entity. Use a userpass (or similar) token, and ensure the helper is not sending a different token (see Quickstart: token resolution order).
+- **`permission denied` (HTTP 403 on `register/begin` or `register/finish`)**: Add `update`/`create` on `auth/<mount>/register/*` to that token’s policies; see **ACL: token used for `register/*`** above.
 - **`passkey auth is not configured`**: write `auth/passkey/config` first (`rp_id`, `allowed_origins`).
 - **`webauthn assertion failed` / `credential parse failed`**:
   - RP ID and Origin mismatch is the most common cause.
@@ -264,3 +289,6 @@ You can run the helper without the WK UI (Safari still opens for Passkey approva
 - **`no registered credentials for user_handle`**: run `register/begin` + `register/finish` first for that `user_handle`.
 - **Browser: “The length options.user.id must be between 1-64 bytes”**: The plugin always sets WebAuthn `user.id` to **SHA-256(principal)** (32 bytes); Vault still stores and looks up credentials by the string `user_handle`. The Safari helper normalizes `user.id` whether the JSON uses base64url strings or byte arrays. **Re-enroll** passkeys if you previously enrolled with an older plugin build.
 
+## Demo
+
+![Passkey Auth Demo](../../demo/passkey-auth-method.gif)
